@@ -96,7 +96,12 @@ make_args() {
 	[ -n "${CUSTOM_CMDS:-}" ] && printf ' %s' "$CUSTOM_CMDS"
 	[ -n "${EXTRA_CMDS:-}"  ] && printf ' %s' "$EXTRA_CMDS"
 	[ -n "${GCC_64:-}"      ] && printf ' %s' "$GCC_64"
-	[ -n "${GCC_32:-}"      ] && printf ' %s' "$GCC_32"
+	# GCC_32 carries the 32-bit cross compiler used for the arm64 compat vDSO.
+	# Pre-5.4 trees named that variable CROSS_COMPILE_ARM32; 5.4 and newer
+	# renamed it to CROSS_COMPILE_COMPAT, and arch/arm64/kernel/vdso32/Makefile
+	# reads only the new name. Pass both so one config works on either tree --
+	# each kernel ignores the spelling it does not know.
+	[ -n "${GCC_32:-}"      ] && printf ' %s CROSS_COMPILE_COMPAT=%s' "$GCC_32" "${GCC_32#CROSS_COMPILE_ARM32=}"
 	if is_true "${USE_LLVM:-false}"; then
 		printf ' LLVM=1 LLVM_IAS=1'
 		[ -n "${GCC_64:-}" ] || printf ' CROSS_COMPILE=aarch64-linux-gnu-'

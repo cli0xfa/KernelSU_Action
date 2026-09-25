@@ -198,6 +198,20 @@ kconf_set_many() {
 
 # --------------------------------------------------------------- patching ---
 
+# resolve_patch PATH -- absolute path for a patch named in a config profile,
+# which is either already absolute or relative to this repository's root.
+#
+# REPO_ROOT is the directory holding scripts/, patches/ and config.env; it is
+# derived from lib.sh's own location so callers can run from anywhere.
+resolve_patch() {
+	local root
+	root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+	case "$1" in
+		/*) printf '%s' "$1" ;;
+		*)  printf '%s' "${root}/$1" ;;
+	esac
+}
+
 # apply_patch FILE [STRIP] -- apply a patch, tolerating already-applied state.
 # Returns 0 when applied or already present, 1 when it genuinely does not fit.
 apply_patch() {

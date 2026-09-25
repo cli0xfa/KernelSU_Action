@@ -39,6 +39,68 @@ susfs_branch_for() {
 	esac
 }
 
+# susfs_apply_custom REF -- apply a single self-contained SUSFS backport.
+#
+# Some forks ship SUSFS for old kernels as one git patch per kernel version
+# (JackA1ltman/NonGKI_Kernel_Build_2nd and friends) rather than susfs4ksu's
+# tree of loose sources plus a numbered patch. Such a patch carries the new
+# files (fs/susfs.c, include/linux/susfs*.h) and every call site itself, so
+# there is nothing to copy and no KernelSU-side patch to skip: the variant's
+# own Kconfig is what declares the SUSFS options.
+susfs_apply_custom() {
+	local repo=${SUSFS_REPO:?SUSFS_REPO is required}
+	local ref=${SUSFS_BRANCH:?SUSFS_BRANCH is required}
+	local file=${SUSFS_PATCH:?SUSFS_PATCH is required}
+	local susfs_dir="${WORKSPACE}/susfs4ksu" patch
+
+	clone_susfs "$repo" "$ref" "$susfs_dir"
+
+	patch="${susfs_dir}/${file}"
+	[ -f "$patch" ] || die "${repo} @ ${ref} has no ${file}
+       Available patches: $(cd "$susfs_dir" && find . -name '*.patch' | sed 's@^\./@@' | head -n20 | tr '\n' ' ')"
+
+	info "applying self-contained SUSFS backport $(basename "$patch")"
+	# git apply, not patch(1): these patches add files and come straight from
+	# git, and --check proves the whole thing fits before anything is written,
+	# so a mismatch cannot leave a half-patched kernel behind.
+	( cd "$KERNEL_DIR" && git apply --check --whitespace=nowarn "$patch" ) \
+		|| die "the SUSFS backport does not apply to this kernel source.
+       It is pinned to the exact tree and commit it was written against; check
+       that KERNEL_SOURCE/KERNEL_PIN_COMMIT still match, or point SUSFS_PATCH
+       at a backport for this kernel version."
+	( cd "$KERNEL_DIR" && git apply --whitespace=nowarn "$patch" ) \
+		|| die "git apply failed for ${file}"
+
+	[ -s "${KERNEL_DIR}/fs/susfs.c" ] \
+		|| die "SUSFS sources are missing after applying ${file}"
+
+	local sv
+	sv=$(sed -nE 's/.*SUSFS_VERSION[[:space:]]+"([^"]+)".*/\1/p' \
+		"${KERNEL_DIR}/include/linux/susfs.h" 2>/dev/null | head -n1)
+	export_env SUSFS_VERSION "${sv:-unknown}"
+	export_env SUSFS_BRANCH_RESOLVED "${ref}"
+	ok "SUSFS ${sv:-?} applied (backport ${ref:0:12})"
+	summary "| SUSFS | \`${sv:-unknown}\` (backport \`${ref:0:12}\`) |"
+}
+
+# clone_susfs REPO REF DEST -- shallow clone, tolerating a commit as REF.
+# `git clone -b` rejects commits, so a pinned commit is fetched explicitly.
+clone_susfs() {
+	local repo=$1 ref=$2 dest=$3
+	rm -rf "$dest"
+	if printf '%s' "$ref" | grep -qE '^[0-9a-f]{40}$'; then
+		retry 3 git init -q "$dest" || die "failed to create ${dest}"
+		git -C "$dest" remote add origin "$repo" || die "failed to add ${repo}"
+		retry 3 git -C "$dest" fetch -q --depth=1 origin "$ref" \
+			|| die "commit ${ref} is not fetchable from ${repo}"
+		git -C "$dest" checkout -q --detach FETCH_HEAD \
+			|| die "failed to check out ${ref}"
+	else
+		retry 3 git clone -q --depth=1 -b "$ref" "$repo" "$dest" \
+			|| die "failed to clone ${repo} @ ${ref}"
+	fi
+}
+
 susfs_apply() {
 	local repo=${SUSFS_REPO:-https://gitlab.com/simonpunk/susfs4ksu.git}
 	local branch=${SUSFS_BRANCH:-auto}
@@ -46,6 +108,13 @@ susfs_apply() {
 	kver=$(kernel_version "$KERNEL_DIR") || die "cannot read kernel version from ${KERNEL_DIR}/Makefile"
 
 	group "Applying SUSFS"
+
+	# A profile that names a patch file uses the single-patch backport path.
+	if [ -n "${SUSFS_PATCH:-}" ]; then
+		susfs_apply_custom
+		endgroup
+		return 0
+	fi
 
 	if [ "$branch" = "auto" ]; then
 		branch=$(susfs_branch_for "$kver")
@@ -59,9 +128,7 @@ susfs_apply() {
        Available: $(git ls-remote --heads "$repo" | awk '{print $2}' | sed 's@refs/heads/@@' | tr '\n' ' ')"
 
 	local susfs_dir="${WORKSPACE}/susfs4ksu"
-	rm -rf "$susfs_dir"
-	retry 3 git clone -q --depth=1 -b "$branch" "$repo" "$susfs_dir" \
-		|| die "failed to clone ${repo} @ ${branch}"
+	clone_susfs "$repo" "$branch" "$susfs_dir"
 
 	local kp="${susfs_dir}/kernel_patches"
 	[ -d "$kp" ] || die "unexpected susfs4ksu layout: ${kp} missing"
@@ -308,6 +375,23 @@ hooks_patch_apply() {
 
 	group "Applying manual syscall hooks (kernel ${kver})"
 
+	# A profile-pinned patch wins over every heuristic below. The generic
+	# per-version patches assume upstream call sites; a vendor tree usually
+	# needs the exact hook sites it ships, so once a profile ships its own
+	# patch there is nothing to guess at.
+	if [ -n "${KSU_HOOKS_PATCH:-}" ]; then
+		local pinned
+		pinned=$(resolve_patch "$KSU_HOOKS_PATCH")
+		[ -f "$pinned" ] || die "KSU_HOOKS_PATCH not found: ${KSU_HOOKS_PATCH}"
+		( cd "$KERNEL_DIR" && apply_patch "$pinned" 1 ) \
+			|| die "the pinned hook patch did not apply: ${KSU_HOOKS_PATCH}
+       It is written against one specific kernel revision; check that
+       KERNEL_SOURCE/KERNEL_PIN_COMMIT still point at it."
+		ok "manual hooks installed from ${KSU_HOOKS_PATCH}"
+		endgroup
+		return 0
+	fi
+
 	# ReSukiSU publishes scope-minimised hook patches keyed by kernel version.
 	if [ "$variant" = "resukisu" ]; then
 		local dir="${WORKSPACE}/ReSukiSU_Patches"
@@ -380,8 +464,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 			# Driven by the *resolved* hook mode, not the raw setting, so that
 			# KSU_HOOK_MODE=auto on a pre-GKI kernel still gets its hooks
 			# patched in rather than only getting the Kconfig symbol set.
+			# A profile that pins its own hook patch counts as manual by
+			# definition -- it ships those hooks itself.
 			if [ "${KSU_VARIANT:-none}" != "none" ] &&
-			   [ "${KSU_HOOK_MODE_RESOLVED:-}" = "manual" ]; then
+			   { [ "${KSU_HOOK_MODE_RESOLVED:-}" = "manual" ] || [ -n "${KSU_HOOKS_PATCH:-}" ]; }; then
 				hooks_patch_apply
 			fi
 

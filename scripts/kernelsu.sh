@@ -118,6 +118,26 @@ ksu_install() {
 	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
 	info "running ${setup_url}"
+
+	# setup.sh skips its clone when the target directory already exists:
+	#     test -d "$GKI_ROOT/KernelSU" || git clone <variant> KernelSU
+	# Vendor trees that vendor KernelSU as a git submodule (Xiaomi MIUI trees
+	# do) therefore keep the OLD repository and the requested ref is checked
+	# out -- or silently fails -- inside it. The build then links a different
+	# KernelSU than the one the profile selected. Clear it so the variant's
+	# repository is the one that lands there.
+	local stale="${KERNEL_DIR}/${dir}"
+	if [ -e "$stale" ]; then
+		local stale_origin=""
+		stale_origin=$(git -C "$stale" remote get-url origin 2>/dev/null || true)
+		if [ "$stale_origin" = "$repo" ]; then
+			info "${dir}/ is already the selected variant; letting setup.sh update it"
+		else
+			warn "removing pre-existing ${dir}/ (origin: ${stale_origin:-unknown}) so ${name} can be installed"
+			rm -rf "$stale"
+		fi
+	fi
+
 	(
 		cd "$KERNEL_DIR"
 		if [ -n "$ref" ]; then
@@ -167,6 +187,25 @@ ksu_install() {
 		fi
 	fi
 	ok "${name} installed at ${head_desc} (${head_sha})"
+
+	# --- optional per-tree fixes for the KernelSU checkout ------------------
+	#
+	# A variant's branch tracks the kernels its maintainers test. When the
+	# target is older (or the vendor tree diverges), the driver can need small
+	# source fixes before it compiles at all -- e.g. SukiSU builtin still calls
+	# SELinux-hide helpers that do not exist below 5.10. Those fixes live in
+	# this repo next to the profile that needs them, and are applied here so
+	# they land before any later step patches the same tree.
+	local extra patch abs
+	for extra in ${KSU_EXTRA_PATCHES:-}; do
+		abs=$(resolve_patch "$extra")
+		[ -f "$abs" ] || die "KSU_EXTRA_PATCHES entry not found: ${extra}"
+		( cd "$ksu_dir" && apply_patch "$abs" 1 ) \
+			|| die "KernelSU-side patch did not apply: ${extra}
+       It is pinned to a specific ${name} revision; check that KSU_REF still
+       matches the revision the patch was written for."
+		ok "applied KernelSU patch ${extra}"
+	done
 
 	# --- publish facts the later steps need --------------------------------
 	local count version_label

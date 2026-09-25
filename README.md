@@ -116,6 +116,10 @@ AOSP 的 clang 预编译仓库有个陷阱：每个 `kernel-build` 分支都会�
 | 选项 | 说明 |
 | --- | --- |
 | `KERNEL_IMAGE_NAME` | 需要刷写的内核二进制名，与设备树里的 `BOARD_KERNEL_IMAGE_NAME` 一致，常见 `Image.gz-dtb` / `Image.gz` / `Image` |
+| `KERNEL_PIN_COMMIT` | 固定到某个 40 位 commit，而不是跟随分支尖端。厂商树常被 rebase，而 hook / SUSFS 补丁都是按特定源码上下文写的，固定在稳定 commit 上才能保证「验证过的组合」可复现 |
+| `KSU_HOOKS_PATCH` | 本仓库内的补丁路径，用于安装 manual hook。当某变体自带的 hook 补丁不覆盖你的内核版本时，用它把 hook 点精确钉死 |
+| `KSU_EXTRA_PATCHES` | 空格分隔的本仓库补丁列表，在 KernelSU 检出目录内应用（例如旧内核上 builtin 分支的构建修复） |
+| `SUSFS_PATCH` | `SUSFS_REPO` 内单个自包含补丁的路径。有些分支按内核版本提供「一个补丁搞定」（JackA1ltman/NonGKI 等），而不是 susfs4ksu 的 `kernel_patches/` 目录结构 |
 | `EXTRA_CMDS` / `CUSTOM_CMDS` | 追加到每次 `make` 的参数，值里可以带 `=` |
 | `USE_LLVM` | 全 LLVM 构建（`LLVM=1 LLVM_IAS=1`），适合 5.10+ |
 | `ADD_OVERLAYFS_CONFIG` | 为 KernelSU 模块与 system 读写提供支持 |
@@ -142,6 +146,8 @@ AOSP 的 clang 预编译仓库有个陷阱：每个 `kernel-build` 分支都会�
 .github/workflows/
   build-kernel.yml   构建入口（workflow_dispatch + workflow_call）
   ci.yml             shellcheck / actionlint / 配置校验 / 上游链接探活
+config/
+  mars-sukisu.env    小米 11 Pro（mars / SM8350 / MIUI 14）配置档
 scripts/
   lib.sh             日志、重试、Kconfig 读写、补丁、引用校验等公共函数
   config.sh          配置解析、输入覆盖、校验
@@ -153,6 +159,7 @@ scripts/
   package.sh         AnyKernel3 / boot.img
 patches/
   legacy_ksu_hooks.sh  旧版 sed hook 脚本（manual 模式的兜底）
+  mars/                小米 11 Pro 专用补丁（manual hooks、builtin 构建修复）
 ```
 
 `build-kernel.yml` 也可以被 `workflow_call` 复用，方便你为每台设备写一个极短的工作流。

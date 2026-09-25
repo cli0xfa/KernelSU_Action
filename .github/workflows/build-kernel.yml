@@ -9,7 +9,7 @@ on:
       config:
         description: "Config file to build (path, relative to the repo root)"
         required: false
-        default: "config.env"
+        default: "config/mars-sukisu.env"
         type: string
       # "config" on the options below means "use whatever the config file says".
       # It is the default so that running the form without touching anything
@@ -76,7 +76,7 @@ on:
 
   workflow_call:
     inputs:
-      config:          { required: false, default: "config.env", type: string }
+      config:          { required: false, default: "config/mars-sukisu.env", type: string }
       ksu_variant:     { required: false, default: "config",     type: string }
       ksu_ref:         { required: false, default: "",           type: string }
       hook_mode:       { required: false, default: "config",     type: string }

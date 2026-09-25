@@ -24,6 +24,10 @@ CONFIG_FILE=${CONFIG_ENV:-config.env}
 declare -A DEFAULTS=(
 	[KERNEL_SOURCE]=""
 	[KERNEL_SOURCE_BRANCH]=""
+	# Optional commit to check out instead of the branch tip. See source.sh:
+	# a vendor tree that gets rebased makes context-sensitive patches
+	# (hooks, SUSFS backports) unverifiable from one build to the next.
+	[KERNEL_PIN_COMMIT]=""
 	[KERNEL_CONFIG]=""
 	[KERNEL_IMAGE_NAME]="Image.gz-dtb"
 	[ARCH]="arm64"
@@ -54,6 +58,14 @@ declare -A DEFAULTS=(
 	[KSU_VARIANT]="none"
 	[KSU_REF]=""
 	[KSU_HOOK_MODE]="auto"
+	# A patch in this repo that installs the manual syscall hooks. Needed when
+	# a variant's own hook patches do not cover the target kernel version and
+	# the tree-specific hook sites have to be pinned exactly.
+	[KSU_HOOKS_PATCH]=""
+	# Space-separated patches in this repo applied inside the KernelSU
+	# checkout (e.g. build fixes for a kernel version the variant's main
+	# branch no longer targets).
+	[KSU_EXTRA_PATCHES]=""
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 
@@ -61,6 +73,10 @@ declare -A DEFAULTS=(
 	[ENABLE_SUSFS]="false"
 	[SUSFS_REPO]="https://gitlab.com/simonpunk/susfs4ksu.git"
 	[SUSFS_BRANCH]="auto"
+	# Path inside SUSFS_REPO to a single self-contained git patch, for forks
+	# that ship one patch per kernel version instead of the susfs4ksu
+	# kernel_patches/ layout.
+	[SUSFS_PATCH]=""
 	[ENABLE_PATH_UMOUNT]="false"
 	[ENABLE_HIDE_STUFF]="false"
 	[ENABLE_KPM]="false"
@@ -230,6 +246,27 @@ validate() {
 		_err "USE_CUSTOM_ANYKERNEL3=true requires CUSTOM_ANYKERNEL3_SOURCE"
 	fi
 
+	# Repo-local patch paths must exist, otherwise the failure only surfaces
+	# after the kernel clone and toolchain download have already run.
+	local p
+	for p in ${CFG[KSU_HOOKS_PATCH]:-} ${CFG[KSU_EXTRA_PATCHES]:-}; do
+		[ -n "$p" ] || continue
+		[ -f "$p" ] || _err "patch file not found in this repo: ${p}"
+	done
+
+	# KERNEL_PIN_COMMIT is handed to `git fetch`, which resolves branches and
+	# tags too -- requiring a full hash keeps the profile honest about what it
+	# pins, instead of silently tracking whatever the branch points at today.
+	local pin=${CFG[KERNEL_PIN_COMMIT]:-}
+	if [ -n "$pin" ]; then
+		printf '%s' "$pin" | grep -qE '^[0-9a-f]{40}$' \
+			|| _err "KERNEL_PIN_COMMIT must be a full 40-character lowercase commit hash (got '${pin}')"
+	fi
+
+	local susfs_patch=${CFG[SUSFS_PATCH]:-}
+	if [ -n "$susfs_patch" ] && ! is_true "${CFG[ENABLE_SUSFS]}"; then
+		_err "SUSFS_PATCH is set but ENABLE_SUSFS is not true"
+	fi
 	[ "$errors" -eq 0 ] || die "${errors} configuration error(s); fix ${CONFIG_FILE} or the workflow inputs"
 }
 

@@ -1,0 +1,107 @@
+diff --git a/fs/exec.c b/fs/exec.c
+index 10769610c847..cbd42abfd32b 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1903,11 +1903,25 @@ out_ret:
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_execveat_hook __read_mostly;
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++			       void *argv, void *envp, int *flags);
++extern int ksu_handle_execveat_sucompat(int *fd,
++					struct filename **filename_ptr,
++					void *argv, void *envp, int *flags);
++#endif
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+ 			      struct user_arg_ptr envp,
+ 			      int flags)
+ {
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_execveat_hook))
++		ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++	else
++		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
++#endif
+ 	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
+ }
+ 
+diff --git a/fs/open.c b/fs/open.c
+index 55b74b65e0c0..84e7638d7e15 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -340,6 +340,10 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
+ 	return ksys_fallocate(fd, mode, offset, len);
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
++#endif
+ /*
+  * access() needs to use the real uid/gid, not the effective uid/gid.
+  * We do this by temporarily clearing all FS-related capabilities and
+@@ -354,6 +358,10 @@ long do_faccessat(int dfd, const char __user *filename, int mode)
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
++
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 5bbf587f5c64..02eb201df81a 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -443,10 +443,20 @@ ssize_t kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
+ }
+ EXPORT_SYMBOL_NS(kernel_read, ANDROID_GKI_VFS_EXPORT_ONLY);
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_vfs_read_hook __read_mostly;
++extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
++			       size_t *count_ptr, loff_t **pos);
++#endif
+ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
+ {
+ 	ssize_t ret;
+ 
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_vfs_read_hook))
++		ksu_handle_vfs_read(&file, &buf, &count, &pos);
++#endif
++
+ 	if (!(file->f_mode & FMODE_READ))
+ 		return -EBADF;
+ 	if (!(file->f_mode & FMODE_CAN_READ))
+diff --git a/fs/stat.c b/fs/stat.c
+index 32109a28ae40..dd0197983a9b 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -149,6 +149,10 @@ int vfs_statx_fd(unsigned int fd, struct kstat *stat,
+ }
+ EXPORT_SYMBOL(vfs_statx_fd);
+ 
++#ifdef CONFIG_KSU
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++			   int *flags);
++#endif
+ /**
+  * vfs_statx - Get basic and extra attributes by filename
+  * @dfd: A file descriptor representing the base dir for a relative filename
+@@ -171,6 +175,10 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
+ 	int error = -EINVAL;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flags);
++#endif
++
+ 	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
+ 		       AT_EMPTY_PATH | KSTAT_QUERY_FLAGS)) != 0)
+ 		return -EINVAL;
