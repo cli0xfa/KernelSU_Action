@@ -447,6 +447,25 @@ kpm_patch_image() {
 
 # --------------------------------------------------------------------- main ---
 
+# setresuid_apply -- apply a profile-pinned patch that wires the driver's
+# setresuid handler into the kernel's syscall path. Only runs when the profile
+# names one (KSU_SETRESUID_PATCH) and a root solution is actually integrated.
+setresuid_apply() {
+	[ -n "${KSU_SETRESUID_PATCH:-}" ] || return 0
+	[ "${KSU_VARIANT:-none}" != "none" ] || return 0
+
+	group "Wiring setresuid hook"
+	local p
+	p=$(resolve_patch "$KSU_SETRESUID_PATCH")
+	[ -f "$p" ] || die "KSU_SETRESUID_PATCH not found: ${KSU_SETRESUID_PATCH}"
+	( cd "$KERNEL_DIR" && apply_patch "$p" 1 ) \
+		|| die "the setresuid wiring patch did not apply: ${KSU_SETRESUID_PATCH}
+       It is written against one specific kernel revision; check that
+       KERNEL_SOURCE/KERNEL_PIN_COMMIT still point at it."
+	ok "setresuid hook wired from ${KSU_SETRESUID_PATCH}"
+	endgroup
+}
+
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	case "${1:-all}" in
 		susfs)        susfs_apply ;;
@@ -473,6 +492,13 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 
 			if is_true "${ENABLE_SUSFS:-false}";      then susfs_apply;      fi
 			if is_true "${ENABLE_HIDE_STUFF:-false}"; then hide_stuff_apply; fi
+
+			# Some SUSFS-mode drivers need call sites inside the kernel's
+			# own syscall paths that no generic hook patch covers (e.g. the
+			# setresuid manager-fd install). Profiles pin those patches
+			# themselves; applied last because SUSFS rewrites the files the
+			# patch context may share.
+			setresuid_apply
 			;;
 		*) die "unknown patch step '$1'" ;;
 	esac

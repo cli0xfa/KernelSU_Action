@@ -66,6 +66,11 @@ declare -A DEFAULTS=(
 	# checkout (e.g. build fixes for a kernel version the variant's main
 	# branch no longer targets).
 	[KSU_EXTRA_PATCHES]=""
+	# A patch in this repo that wires the driver's setresuid handler into the
+	# kernel's syscall path. Required by some SUSFS-mode integrations where
+	# the manager-fd install hook is compiled out of the driver and must be
+	# called from kernel/sys.c instead.
+	[KSU_SETRESUID_PATCH]=""
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 
@@ -249,7 +254,7 @@ validate() {
 	# Repo-local patch paths must exist, otherwise the failure only surfaces
 	# after the kernel clone and toolchain download have already run.
 	local p
-	for p in ${CFG[KSU_HOOKS_PATCH]:-} ${CFG[KSU_EXTRA_PATCHES]:-}; do
+	for p in ${CFG[KSU_HOOKS_PATCH]:-} ${CFG[KSU_EXTRA_PATCHES]:-} ${CFG[KSU_SETRESUID_PATCH]:-}; do
 		[ -n "$p" ] || continue
 		[ -f "$p" ] || _err "patch file not found in this repo: ${p}"
 	done

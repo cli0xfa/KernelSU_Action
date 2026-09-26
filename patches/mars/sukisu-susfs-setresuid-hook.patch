@@ -1,0 +1,40 @@
+SukiSU/SUSFS: wire ksu_handle_setresuid into kernel/sys.c
+
+With CONFIG_KSU_SUSFS=y the driver's LSM task_fix_setuid hook is
+compiled out (lsm_hook.c guards it with #ifndef CONFIG_KSU_SUSFS), and
+ksu_handle_setresuid() becomes the only path that installs the manager
+driver fd (ksu_install_fd) and disables seccomp for the manager. Nothing
+in this kernel called it, so the SukiSU manager always reports
+"no KernelSU driver detected on kernel" even though the driver is
+present and the kernel otherwise works.
+
+Wiring taken from WildKernels/Sultan_KernelSU_SUSFS (same 5.4 vendor
+tree family): declare the handler under CONFIG_KSU_SUSFS right before
+__sys_setresuid() and call it at the top of the function body. The
+handler itself filters by zygote SID, so calling it on every setresuid
+is safe and matches the reference implementation.
+---
+diff --git a/kernel/sys.c b/kernel/sys.c
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -617,6 +617,10 @@
+ 	return __sys_setuid(uid);
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
++#endif
++
+ 
+ /*
+  * This function implements a generic ability to update ruid, euid,
+@@ -630,6 +634,9 @@
+ 	int retval;
+ 	kuid_t kruid, keuid, ksuid;
+ 
++#ifdef CONFIG_KSU_SUSFS
++	(void)ksu_handle_setresuid(ruid, euid, suid);
++#endif
+ 	kruid = make_kuid(ns, ruid);
+ 	keuid = make_kuid(ns, euid);
+ 	ksuid = make_kuid(ns, suid);
