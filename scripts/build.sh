@@ -257,10 +257,14 @@ verify_required_config() {
 # by genksyms from the source tree's own header type signatures. A stock
 # module built by the vendor from a tree you do not have therefore cannot be
 # loaded by your kernel -- the very first symbol (module_layout) is rejected
-# and every dependent driver (display, touch, Wi-Fi, storage) fails with it.
-# The only reliable answer is to ship modules built from this same tree.
+# and every dependent driver fails with it. Anything that must be a module has
+# to come from this same tree.
 #
-# Modules are staged under ${WORKSPACE}/modules-stage/vendor/lib/modules so
+# On many Qualcomm trees (including the Xiaomi mars one) the device config
+# builds every driver as "=y" instead, so this step legitimately produces
+# nothing -- see the zero-.ko branch below.
+#
+# Modules are staged under ${WORKSPACE}/modules-vendor/vendor/lib/modules so
 # that package.sh can drop them into an AnyKernel3 "modules/" overlay, which
 # AnyKernel3 turns into a systemless module that bind-mounts over /vendor.
 build_modules() {
