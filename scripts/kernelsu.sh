@@ -253,7 +253,15 @@ ksu_hook_configs() {
 		kconf_enable "$defconfig" CONFIG_HAVE_KPROBES
 		kconf_enable "$defconfig" CONFIG_KPROBE_EVENTS
 		kconf_enable "$defconfig" CONFIG_KRETPROBES
-		[ "$variant" = "kernelsu-next" ] && kconf_enable "$defconfig" CONFIG_KSU_KPROBES_HOOK
+		# Only kernelsu-next declares this symbol; the others implement their
+		# kprobe hooks unconditionally. Written as an if rather than
+		# `[ ... ] && cmd` on purpose: when the test is false the compound
+		# command returns 1, and this function is called as a plain command
+		# from prepare_defconfig under `set -e`, so the whole build aborted
+		# with no diagnostic at all.
+		if [ "$variant" = "kernelsu-next" ]; then
+			kconf_enable "$defconfig" CONFIG_KSU_KPROBES_HOOK
+		fi
 		;;
 	manual)
 		case "$variant" in

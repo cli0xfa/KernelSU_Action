@@ -76,6 +76,11 @@ declare -A DEFAULTS=(
 	[ENABLE_PATH_UMOUNT]="false"
 	[ENABLE_HIDE_STUFF]="false"
 	[ENABLE_KPM]="false"
+	# Some Qualcomm trees pin the watchdog bark/pet time with a single-value
+	# Kconfig `range`, which silently overrides whatever the defconfig asks for.
+	[ENABLE_WATCHDOG_RELAX]="false"
+	[WATCHDOG_BARK_TIME]="20000"
+	[WATCHDOG_PET_TIME]="15000"
 
 	# Kconfig tweaks
 	[ADD_KPROBES_CONFIG]="false"
@@ -252,6 +257,15 @@ validate() {
 
 	if is_true "${CFG[USE_CUSTOM_ANYKERNEL3]}" && [ -z "${CFG[CUSTOM_ANYKERNEL3_SOURCE]}" ]; then
 		_err "USE_CUSTOM_ANYKERNEL3=true requires CUSTOM_ANYKERNEL3_SOURCE"
+	fi
+
+	if is_true "${CFG[ENABLE_WATCHDOG_RELAX]}"; then
+		case "${CFG[WATCHDOG_BARK_TIME]}" in
+			'' | *[!0-9]*) _err "WATCHDOG_BARK_TIME must be a number of milliseconds" ;;
+		esac
+		case "${CFG[WATCHDOG_PET_TIME]}" in
+			'' | *[!0-9]*) _err "WATCHDOG_PET_TIME must be a number of milliseconds" ;;
+		esac
 	fi
 
 	[ "$errors" -eq 0 ] || die "${errors} configuration error(s); fix ${CONFIG_FILE} or the workflow inputs"

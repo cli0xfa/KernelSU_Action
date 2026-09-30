@@ -277,6 +277,75 @@ EOF
 
 # ============================================================== extra patches
 
+# Some Qualcomm trees pin the watchdog timing with a degenerate single-value
+# Kconfig `range`:
+#
+#     config QCOM_WATCHDOG_BARK_TIME
+#         int "..."
+#         default 11000
+#         range 11000 11000
+#
+# A `range X X` is not a default -- it is a hard constraint. Kconfig clamps any
+# other value to X, so a defconfig asking for the stock 20000 (or anything
+# else) is silently rewritten back to 11000, and the resulting kernel bites the
+# watchdog roughly 11 seconds into boot even when nothing is actually hung.
+# That shows up as a boot loop whose timing looks like a random hang, which is
+# extremely hard to diagnose from the outside.
+#
+# This rewrites the range to the requested values so the defconfig survives.
+watchdog_relax_apply() {
+	local bark=${WATCHDOG_BARK_TIME:-20000}
+	local pet=${WATCHDOG_PET_TIME:-15000}
+
+	group "Relaxing watchdog timing (bark ${bark}ms / pet ${pet}ms)"
+
+	local kconfig="${KERNEL_DIR}/drivers/soc/qcom/Kconfig"
+	if [ ! -f "$kconfig" ]; then
+		info "drivers/soc/qcom/Kconfig not found; nothing to do"
+		endgroup; return 0
+	fi
+
+	local changed=0 sym cur
+	for sym in "QCOM_WATCHDOG_BARK_TIME:bark:${bark}" "QCOM_WATCHDOG_PET_TIME:pet:${pet}"; do
+		local name=${sym%%:*}; local rest=${sym#*:}; local label=${rest%%:*}; local val=${rest#*:}
+
+		# Only act when the symbol is declared here at all.
+		grep -qE "^config[[:space:]]+${name}\$" "$kconfig" || continue
+
+		# Capture the existing range (if any) so the change is reported.
+		cur=$(awk -v s="config ${name}" '
+			$0 ~ "^"s"$" { found=1; next }
+			found && /^config / { exit }
+			found && /^[[:space:]]*range[[:space:]]/ { print $2; exit }
+		' "$kconfig")
+
+		if [ -z "$cur" ]; then
+			info "${name}: no range constraint (value comes from the defconfig)"
+			continue
+		fi
+		if [ "$cur" = "$val" ]; then
+			ok "${name}: range is already ${val}"
+			continue
+		fi
+
+		# Rewrite only the range line belonging to this config block.
+		awk -v s="config ${name}" -v v="$val" '
+			$0 ~ "^"s"$" { found=1; print; next }
+			found && /^config / { found=0 }
+			found && /^[[:space:]]*range[[:space:]]/ { sub(/range[[:space:]]+[0-9]+[[:space:]]+[0-9]+/, "range " v " " v); found=0; print; next }
+			{ print }
+		' "$kconfig" >"${kconfig}.tmp" && mv "${kconfig}.tmp" "$kconfig"
+
+		changed=$((changed + 1))
+		ok "${name}: range ${cur} ${cur} -> ${val} ${val}"
+	done
+
+	if [ "$changed" -gt 0 ]; then
+		summary "| Watchdog | bark ${bark}ms / pet ${pet}ms (range unpinned) |"
+	fi
+	endgroup
+}
+
 SUKISU_PATCH_REPO=${SUKISU_PATCH_REPO:-https://github.com/ShirkNeko/SukiSU_patch.git}
 
 # Clone the shared patch/tool repo once, on demand.
@@ -369,6 +438,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 		path_umount)  path_umount_apply ;;
 		hide_stuff)   hide_stuff_apply ;;
 		hooks)        hooks_patch_apply ;;
+		watchdog)     watchdog_relax_apply ;;
 		kpm)          kpm_patch_image "$2" ;;
 		all)
 			# Order matters and this is the tested one (4.19 + SukiSU builtin
@@ -376,6 +446,10 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 			#   path_umount and the hook patches both key off textual anchors
 			#   in files that SUSFS later rewrites, so they go first.
 			if is_true "${ENABLE_PATH_UMOUNT:-false}"; then path_umount_apply; fi
+
+			# Must run before the defconfig is generated, since it changes what
+			# Kconfig will accept for the watchdog options.
+			if is_true "${ENABLE_WATCHDOG_RELAX:-false}"; then watchdog_relax_apply; fi
 
 			# Driven by the *resolved* hook mode, not the raw setting, so that
 			# KSU_HOOK_MODE=auto on a pre-GKI kernel still gets its hooks

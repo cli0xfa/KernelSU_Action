@@ -131,6 +131,12 @@ make_args() {
 		printf ' LLVM=1 LLVM_IAS=1'
 		[ -n "${GCC_64:-}" ] || printf ' CROSS_COMPILE=aarch64-linux-gnu-'
 	fi
+	# Several lines above are `[ test ] && printf`, which return 1 when the test
+	# fails. Callers capture this function with `args=$(make_args)`, and the
+	# exit status of a command substitution becomes the status of the
+	# assignment -- so a false test in the last line would abort the whole
+	# build under `set -e`, silently. Nothing here can actually fail.
+	return 0
 }
 
 build_kernel() {
