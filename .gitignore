@@ -2,3 +2,4 @@
 # Local device partition dumps (never commit: large, device-specific)
 _backup_mars/
 
+dist/
