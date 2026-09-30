@@ -43,7 +43,8 @@ clang_known_good() {
 		main-kernel-build-2024/r510928 | \
 		main-kernel-build-2023/r498229b | \
 		master-kernel-build-2022/r450784e | \
-		master-kernel-build-2021/r416183b) return 0 ;;
+		master-kernel-build-2021/r416183b | \
+		android12-release/r416183b) return 0 ;;
 		*) return 1 ;;
 	esac
 }

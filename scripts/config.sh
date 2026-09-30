@@ -25,6 +25,18 @@ declare -A DEFAULTS=(
 	[KERNEL_SOURCE]=""
 	[KERNEL_SOURCE_BRANCH]=""
 	[KERNEL_CONFIG]=""
+	# Extra config fragments merged after KERNEL_CONFIG, space separated, e.g.
+	# "vendor/xiaomi_QGKI.config vendor/star_QGKI.config". Qualcomm trees split
+	# device options across such files (make's %.config target runs
+	# merge_config.sh for each one). KERNEL_CONFIG itself must stay a single
+	# path: it also names the device and is edited in place.
+	[KERNEL_CONFIG_FRAGMENTS]=""
+	# Symbols that must survive into the resolved .config, space separated,
+	# written as CONFIG_X=y or bare CONFIG_X ("must be set"). A fragment that
+	# does not apply, or a symbol whose dependency is unmet, is dropped
+	# silently -- which is how a build "succeeds" while shipping a kernel with
+	# no KernelSU in it. This turns that into a hard failure.
+	[KERNEL_REQUIRED_CONFIG]=""
 	[KERNEL_IMAGE_NAME]="Image.gz-dtb"
 	[ARCH]="arm64"
 	[KERNEL_NAME]=""
@@ -79,6 +91,9 @@ declare -A DEFAULTS=(
 	[NEED_DTBO]="false"
 	[BUILD_BOOT_IMG]="false"
 	[SOURCE_BOOT_IMAGE]=""
+
+	# Compile the tree's loadable modules and ship them as an overlay package.
+	[BUILD_MODULES]="false"
 
 	# Runner
 	[ENABLE_CCACHE]="true"
@@ -186,6 +201,15 @@ validate() {
 	[ -n "${CFG[KERNEL_SOURCE]}" ]        || _err "KERNEL_SOURCE is required"
 	[ -n "${CFG[KERNEL_SOURCE_BRANCH]}" ] || _err "KERNEL_SOURCE_BRANCH is required"
 	[ -n "${CFG[KERNEL_CONFIG]}" ]        || _err "KERNEL_CONFIG is required"
+	case "${CFG[KERNEL_CONFIG]}" in
+		*" "*) _err "KERNEL_CONFIG must be a single path; put additional fragments in KERNEL_CONFIG_FRAGMENTS" ;;
+	esac
+	local _frag
+	for _frag in ${CFG[KERNEL_CONFIG_FRAGMENTS]}; do
+		case "$_frag" in
+			*" "*) _err "KERNEL_CONFIG_FRAGMENTS entries must not contain spaces" ;;
+		esac
+	done
 	[ -n "${CFG[KERNEL_IMAGE_NAME]}" ]    || _err "KERNEL_IMAGE_NAME is required"
 
 	case "${CFG[ARCH]}" in

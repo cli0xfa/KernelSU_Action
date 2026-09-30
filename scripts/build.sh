@@ -18,11 +18,41 @@ DEFCONFIG_PATH="${KERNEL_DIR}/arch/${ARCH}/configs/${KERNEL_CONFIG}"
 
 # ------------------------------------------------------------- defconfig ---
 
+# The make targets that produce .config, in order.
+#
+# Qualcomm trees split device options across several files and rely on make's
+# `%.config` rule (scripts/kconfig/merge_config.sh) to fold each one into the
+# .config the preceding `%_defconfig` target generated. So the target list --
+# not a single defconfig -- is the unit that describes a device:
+#
+#     vendor/lahaina-qgki_defconfig vendor/xiaomi_QGKI.config vendor/star_QGKI.config
+#
+# KERNEL_CONFIG is the first, single-path entry (it also names the device and
+# is the file this script edits); KERNEL_CONFIG_FRAGMENTS are merged after it.
+defconfig_targets() {
+	printf '%s' "$KERNEL_CONFIG"
+	local frag
+	for frag in ${KERNEL_CONFIG_FRAGMENTS:-}; do
+		printf ' %s' "$frag"
+	done
+}
+
 prepare_defconfig() {
 	group "Preparing defconfig"
 	[ -f "$DEFCONFIG_PATH" ] \
 		|| die "defconfig not found: arch/${ARCH}/configs/${KERNEL_CONFIG}
        Available: $(ls "${KERNEL_DIR}/arch/${ARCH}/configs/" | head -20 | tr '\n' ' ')"
+
+	# Fragments are merged by make after the base defconfig, so they must exist
+	# too -- merge_config.sh silently tolerates a missing fragment and the
+	# device options in it would just never be applied.
+	local frag
+	for frag in ${KERNEL_CONFIG_FRAGMENTS:-}; do
+		[ -f "${KERNEL_DIR}/arch/${ARCH}/configs/${frag}" ] \
+			|| die "config fragment not found: arch/${ARCH}/configs/${frag}
+       Check KERNEL_CONFIG_FRAGMENTS; a missing fragment is silently ignored by
+       merge_config.sh and the options in it would never reach the build."
+	done
 
 	cp "$DEFCONFIG_PATH" "${WORKSPACE}/defconfig.orig"
 
@@ -132,16 +162,174 @@ build_kernel() {
 	fi
 
 	cd "$KERNEL_DIR"
-	info "make ${args} ${KERNEL_CONFIG}"
 	# shellcheck disable=SC2086
-	make -j"$(nproc --all)" CC=clang $args "${KERNEL_CONFIG}" \
+	local targets
+	targets=$(defconfig_targets)
+	info "make ${args} ${targets}"
+	# Unquoted on purpose: this is a target list, and make folds each
+	# ".config" fragment into the .config produced by the preceding
+	# "_defconfig" target via scripts/kconfig/merge_config.sh.
+	# shellcheck disable=SC2086
+	make -j"$(nproc --all)" CC=clang $args $targets \
 		|| die "defconfig generation failed"
+
+	verify_required_config
 
 	info "make ${args}"
 	# shellcheck disable=SC2086
 	make -j"$(nproc --all)" CC="$cc" $args \
 		|| die "kernel build failed"
 
+	endgroup
+}
+
+# Fail the build when a symbol we asked for did not survive into .config.
+#
+# An unknown symbol in a defconfig, a fragment that never got merged, and a
+# symbol whose Kconfig dependency is unmet all look the same from the outside:
+# the line is simply absent from .config and the build proceeds. On a kernel
+# whose only purpose is to carry KernelSU that produces a root-capable-looking
+# image with no root in it, so it is worth an explicit check.
+verify_required_config() {
+	local cfg="${OUT}/.config"
+	local spec sym want got missing=0
+
+	[ -f "$cfg" ] || die "no ${cfg} after defconfig generation"
+
+	# KERNEL_REQUIRED_CONFIG may name the KernelSU symbols implicitly; always
+	# assert them when a variant was requested, since that is the whole point.
+	if [ "${KSU_VARIANT:-none}" != "none" ]; then
+		spec="CONFIG_KSU=y"
+	fi
+	spec="${spec} ${KERNEL_REQUIRED_CONFIG:-}"
+
+	[ -n "${spec// /}" ] || return 0
+
+	group "Verifying required config"
+	for sym in $spec; do
+		want="y"
+		case "$sym" in
+			*=*) want="${sym#*=}"; sym="${sym%%=*}" ;;
+		esac
+		case "$sym" in CONFIG_*) ;; *) sym="CONFIG_${sym}" ;; esac
+
+		got=$(sed -nE "s/^${sym}=(.*)$/\1/p" "$cfg" | tail -n1)
+		if [ "$want" = "y" ]; then
+			if [ "$got" = "y" ]; then
+				ok "${sym}=y"
+			else
+				warn "${sym} is not set in .config (value: '${got:-unset}')"
+				missing=$((missing + 1))
+			fi
+		else
+			if [ "$got" = "$want" ]; then
+				ok "${sym}=${want}"
+			else
+				warn "${sym} is '${got:-unset}', expected '${want}'"
+				missing=$((missing + 1))
+			fi
+		fi
+	done
+
+	if [ "$missing" -gt 0 ]; then
+		die "${missing} required config option(s) missing from .config.
+       A symbol that is unknown, or whose dependency is unmet, is dropped from
+       a defconfig without any error -- the kernel then builds fine while
+       missing the feature you asked for. Fix KERNEL_CONFIG_FRAGMENTS or
+       KERNEL_REQUIRED_CONFIG (check that the option exists in the tree's
+       Kconfig: grep -rn 'config ${sym#CONFIG_}' ${KERNEL_DIR})."
+	fi
+	endgroup
+}
+
+# ---------------------------------------------------------------- modules ---
+
+# Compile the tree's loadable modules and stage them in a /vendor-shaped tree.
+#
+# Why this exists: CONFIG_MODVERSIONS makes module loadability depend on the
+# symbol CRCs baked into the *kernel's* __kcrctab, and those CRCs are computed
+# by genksyms from the source tree's own header type signatures. A stock
+# module built by the vendor from a tree you do not have therefore cannot be
+# loaded by your kernel -- the very first symbol (module_layout) is rejected
+# and every dependent driver (display, touch, Wi-Fi, storage) fails with it.
+# The only reliable answer is to ship modules built from this same tree.
+#
+# Modules are staged under ${WORKSPACE}/modules-stage/vendor/lib/modules so
+# that package.sh can drop them into an AnyKernel3 "modules/" overlay, which
+# AnyKernel3 turns into a systemless module that bind-mounts over /vendor.
+build_modules() {
+	is_true "${BUILD_MODULES:-false}" || { debug "module build disabled"; return 0; }
+	group "Building kernel modules"
+
+	local args stage
+	args=$(make_args)
+	stage="${WORKSPACE}/modules-stage"
+	rm -rf "$stage"
+	mkdir -p "$stage"
+
+	cd "$KERNEL_DIR"
+	info "make ${args} modules"
+	# Techpack (camera/audio/datarmnet) ships external Makefiles that only
+	# emit modules when modules are actually requested, so this must be a
+	# separate invocation after the kernel image has been built.
+	# shellcheck disable=SC2086
+	make -j"$(nproc --all)" $args modules \
+		|| die "module build failed"
+
+	# modules_install wants CC/INSTALL_MOD_PATH and a destination outside the
+	# tree so that ${stage} can be shipped verbatim.
+	# shellcheck disable=SC2086
+	make -j"$(nproc --all)" $args \
+		INSTALL_MOD_PATH="$stage" \
+		INSTALL_MOD_STRIP=1 \
+		modules_install \
+		|| die "module staging failed"
+
+	# modules_install creates build/ and source/ symlinks pointing back into
+	# the build tree. They are meaningless (and dangling) inside a flashable
+	# overlay, so drop them.
+	rm -rf "${stage}/lib/modules/"*/build "${stage}/lib/modules/"*/source
+
+	local release modroot
+	release=$(cat "${OUT}/include/config/kernel.release" 2>/dev/null || echo "")
+	modroot="${stage}/lib/modules/${release}"
+	[ -d "$modroot" ] || modroot=$(find "$stage/lib/modules" -maxdepth 1 -mindepth 1 -type d | head -n1)
+	[ -d "$modroot" ] || die "modules_install produced no module directory under ${stage}"
+
+	local count
+	count=$(find "$modroot" -name '*.ko' | wc -l)
+	if [ "$count" -eq 0 ]; then
+		# Not an error: a config that builds everything as "=y" produces no
+		# modules at all, and that is the desired outcome on a device whose
+		# stock modules cannot be loaded by a foreign kernel anyway.
+		warn "modules_install staged no .ko files; every driver is built into the image"
+		endgroup
+		return 0
+	fi
+
+	# Reshape into the layout the device uses: modules live flat in
+	# /vendor/lib/modules, and /system/vendor is a symlink to /vendor. Only the
+	# .ko files are staged -- deliberately not the generated modules.dep /
+	# modules.alias / modules.softdep. Those are overlaid too if present, and
+	# a dep file generated from just our subset would drop the entries for any
+	# module we did not build, breaking modprobe for it. Leaving the stock dep
+	# files in place keeps dependency resolution working by filename, so the
+	# names we did build resolve to our .ko.
+	local out="${WORKSPACE}/modules-vendor/vendor/lib/modules"
+	rm -rf "${WORKSPACE}/modules-vendor"
+	mkdir -p "$out"
+	find "$modroot" -name '*.ko' -exec cp -a {} "$out/" \;
+
+	local staged
+	staged=$(find "$out" -name '*.ko' | wc -l)
+	[ "$staged" -gt 0 ] || die "no .ko files were staged into ${out}"
+	[ "$staged" -eq "$count" ] \
+		|| warn "staged ${staged} of ${count} built modules (some names may collide)"
+
+	export_env MODULE_STAGE "${WORKSPACE}/modules-vendor"
+	export_env MODULE_COUNT "$staged"
+	ok "staged ${staged} modules for release ${release:-unknown}"
+	summary "| Modules | \`${staged}\` staged under \`vendor/lib/modules\` |"
 	endgroup
 }
 
@@ -186,8 +374,9 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	case "${1:-all}" in
 		defconfig) prepare_defconfig ;;
 		compile)   build_kernel ;;
+		modules)   build_modules ;;
 		check)     check_output ;;
-		all)       prepare_defconfig; build_kernel; check_output ;;
+		all)       prepare_defconfig; build_kernel; build_modules; check_output ;;
 		*) die "unknown build step '$1'" ;;
 	esac
 fi

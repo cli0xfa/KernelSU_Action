@@ -68,6 +68,12 @@ on:
         required: false
         default: ""
         type: string
+      build_modules:
+        description: "Compile and ship loadable modules (needed when the ROM's stock .ko files cannot load)"
+        required: false
+        default: "config"
+        type: choice
+        options: [config, "true", "false"]
       publish_release:
         description: "Publish the build as a GitHub Release"
         required: false
@@ -85,6 +91,7 @@ on:
       hide_stuff:      { required: false, default: "config",     type: string }
       kpm:             { required: false, default: "config",     type: string }
       extra_defconfig: { required: false, default: "",           type: string }
+      build_modules:   { required: false, default: "config",     type: string }
       publish_release: { required: false, default: false,        type: boolean }
 
 # Only one build per ref at a time; a newer run supersedes an older one.
@@ -123,6 +130,7 @@ jobs:
       IN_ENABLE_HIDE_STUFF: ${{ inputs.hide_stuff }}
       IN_ENABLE_KPM: ${{ inputs.kpm }}
       IN_EXTRA_DEFCONFIG: ${{ inputs.extra_defconfig }}
+      IN_BUILD_MODULES: ${{ inputs.build_modules }}
 
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +231,18 @@ jobs:
         with:
           name: dtbo-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
           path: kernel_workspace/android-kernel/out/arch/${{ env.ARCH }}/boot/dtbo.img
+
+      # Raw .ko tree, alongside the AnyKernel3 zip. The zip already carries
+      # these as a systemless overlay (do.modules=1); this separate artifact
+      # exists so the modules can be bind-mounted by hand when the ROM is being
+      # brought up without a working root solution yet.
+      - name: Upload loadable modules
+        if: env.MODULE_STAGE != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: modules-${{ env.LOCALVERSION }}${{ env.UPLOADNAME }}-${{ env.DEVICE }}-${{ env.BUILD_TIME }}
+          path: kernel_workspace/modules-vendor/vendor/lib/modules/*.ko
+          if-no-files-found: warn
 
       - name: Upload boot image
         if: env.MAKE_BOOT_IMAGE_IS_OK == 'true'

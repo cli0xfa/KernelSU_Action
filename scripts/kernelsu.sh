@@ -115,6 +115,22 @@ ksu_install() {
 		warn "Pin KSU_REF (e.g. a tag) if you need reproducible builds."
 	fi
 
+	# A vendor tree may already vendor KernelSU as a git submodule (the Xiaomi
+	# MIUI trees do), and setup.sh begins with
+	#     test -d "$GKI_ROOT/KernelSU" || git clone ... KernelSU
+	# so an existing directory is reused rather than cloned. Because source.sh
+	# clones --recursive --depth=1, that submodule is shallow: the tag or branch
+	# we ask for often is not present, `git checkout` fails, and setup.sh's own
+	# `|| echo "[-] Checkout default branch"` swallows it -- leaving the wrong
+	# commit with no error. Always start from a clean directory instead.
+	if [ -e "${KERNEL_DIR}/${dir}" ]; then
+		info "removing pre-existing ${dir}/ so setup.sh clones a fresh ${repo}"
+		rm -rf "${KERNEL_DIR}/${dir}"
+	fi
+	# Same for a stale symlink from a previous run, which would otherwise be
+	# left pointing at the directory we just deleted.
+	[ -L "${KERNEL_DIR}/drivers/kernelsu" ] && rm -f "${KERNEL_DIR}/drivers/kernelsu"
+
 	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
 	info "running ${setup_url}"

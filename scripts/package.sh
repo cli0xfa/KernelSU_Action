@@ -11,6 +11,81 @@ ARCH=${ARCH:-arm64}
 BOOT_OUT="${KERNEL_DIR}/out/arch/${ARCH}/boot"
 AK3="${WORKSPACE}/AnyKernel3"
 
+# Replace AnyKernel3's bundled sample install body with a minimal plain
+# boot install.
+#
+# AnyKernel3 ships a Galaxy Nexus (tuna) example whose body calls
+# backup_file/replace_string/insert_line/append_file/patch_fstab on init.rc,
+# init.tuna.rc and fstab.tuna. None of those files exist on a modern device:
+# the calls are no-ops at best, and on some devices they rewrite a file that
+# happens to share a name. What we want is the plain install every real
+# device uses -- unpack the active boot slot, swap the kernel, repack -- so
+# the stock ramdisk comes out byte-identical and the only variable under test
+# is the kernel itself.
+write_anykernel_body() {
+	local ak3=$1
+
+	# Keep the header (properties/boot_attributes) and the shell variables
+	# that select the partition; replace everything from dump_boot onward.
+	local head
+	head=$(mktemp)
+	awk '/^dump_boot/ { exit } { print }' "${ak3}/anykernel.sh" >"$head"
+
+	{
+		cat "$head"
+		cat <<'AK3BODY'
+# boot install: unpack the active slot, replace the kernel, repack.
+# split_boot (not dump_boot) is used deliberately: the vendor ramdisk is
+# left exactly as it is, so the flash is kernel-only and the ramdisk that
+# boots is the one already on the device.
+split_boot;
+
+# On header v3+ devices the dtb lives in vendor_boot, not in the boot image;
+# flash_boot skips the ramdisk repack entirely and only writes the new kernel
+# plus the boot header.
+flash_boot;
+## end boot install
+AK3BODY
+	} >"${ak3}/anykernel.sh"
+	rm -f "$head"
+
+	grep -q '^split_boot;' "${ak3}/anykernel.sh" \
+		|| die "failed to write the AnyKernel3 install body"
+}
+
+# Turn "modules/vendor/lib/modules/*.ko" into an ak3-helper systemless module.
+#
+# do.systemless=1 makes AnyKernel3 package the modules/ tree as a Magisk or
+# KernelSU module that bind-mounts over /vendor, rather than writing into the
+# (read-only, erofs, dm-verity'd) vendor partition. On this device there is no
+# vendor_dlkm partition to flash either, so an overlay is the only mechanism
+# that can replace a module at all.
+attach_modules() {
+	[ -n "${MODULE_STAGE:-}" ] && [ -d "${MODULE_STAGE}" ] || return 0
+	group "Attaching module overlay"
+
+	local src="${MODULE_STAGE}/vendor/lib/modules"
+	[ -d "$src" ] || die "MODULE_STAGE is set but ${src} does not exist"
+
+	rm -rf "${AK3}/modules"
+	mkdir -p "${AK3}/modules/vendor/lib/modules"
+	cp -a "${src}/." "${AK3}/modules/vendor/lib/modules/"
+
+	local nmod
+	nmod=$(find "${AK3}/modules" -name '*.ko' | wc -l)
+	[ "$nmod" -gt 0 ] || die "no .ko files found under ${src}"
+
+	# do.systemless=1 is already the AnyKernel3 default; do.modules must be
+	# turned on for the modules/ tree to be packaged at all.
+	sed -i 's/^do\.modules=0$/do.modules=1/' "${AK3}/anykernel.sh"
+	grep -q '^do\.modules=1' "${AK3}/anykernel.sh" \
+		|| die "could not enable do.modules in anykernel.sh"
+
+	ok "${nmod} modules attached as a systemless overlay"
+	summary "| AnyKernel3 modules | \`${nmod}\` (\`do.modules=1\`, \`do.systemless=1\`) |"
+	endgroup
+}
+
 make_anykernel3() {
 	group "Building AnyKernel3 package"
 	rm -rf "$AK3"
@@ -40,6 +115,11 @@ make_anykernel3() {
 		sed -i 's!BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;!BLOCK=auto;!g' "${AK3}/anykernel.sh"
 		sed -i 's/IS_SLOT_DEVICE=0;/is_slot_device=auto;/g' "${AK3}/anykernel.sh"
 	fi
+
+	# The sample install body always needs replacing; both the stock AnyKernel3
+	# clone and most custom templates ship the tuna example.
+	write_anykernel_body "$AK3"
+	attach_modules
 
 	cp "${BOOT_OUT}/${KERNEL_IMAGE_NAME}" "${AK3}/" \
 		|| die "kernel image missing at ${BOOT_OUT}/${KERNEL_IMAGE_NAME}"
