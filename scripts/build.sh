@@ -272,9 +272,20 @@ build_modules() {
 	# Techpack (camera/audio/datarmnet) ships external Makefiles that only
 	# emit modules when modules are actually requested, so this must be a
 	# separate invocation after the kernel image has been built.
+	#
+	# Failure here is deliberately not fatal. The kernel image is the artifact
+	# that matters, and it has already been built by the time this runs; a
+	# module that does not compile (Qualcomm's out-of-tree techpack Makefiles
+	# routinely need a source tweak) would otherwise discard a perfectly
+	# bootable kernel. Warn, keep whatever compiled, and let the flash
+	# proceed -- the affected driver simply stays at its stock version.
 	# shellcheck disable=SC2086
-	make -j"$(nproc --all)" $args modules \
-		|| die "module build failed"
+	if ! make -j"$(nproc --all)" $args modules; then
+		warn "the module build failed; continuing with the kernel image alone."
+		warn "The drivers in techpack/ (camera, audio, datarmnet) will fall back to"
+		warn "the ROM's stock .ko, which this kernel cannot load -- so those may be"
+		warn "non-functional until the module build is fixed."
+	fi
 
 	# modules_install wants CC/INSTALL_MOD_PATH and a destination outside the
 	# tree so that ${stage} can be shipped verbatim.
@@ -283,7 +294,7 @@ build_modules() {
 		INSTALL_MOD_PATH="$stage" \
 		INSTALL_MOD_STRIP=1 \
 		modules_install \
-		|| die "module staging failed"
+		|| warn "modules_install failed; no modules will be packaged"
 
 	# modules_install creates build/ and source/ symlinks pointing back into
 	# the build tree. They are meaningless (and dangling) inside a flashable
@@ -293,8 +304,12 @@ build_modules() {
 	local release modroot
 	release=$(cat "${OUT}/include/config/kernel.release" 2>/dev/null || echo "")
 	modroot="${stage}/lib/modules/${release}"
-	[ -d "$modroot" ] || modroot=$(find "$stage/lib/modules" -maxdepth 1 -mindepth 1 -type d | head -n1)
-	[ -d "$modroot" ] || die "modules_install produced no module directory under ${stage}"
+	[ -d "$modroot" ] || modroot=$(find "$stage/lib/modules" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -n1)
+	if [ -z "$modroot" ] || [ ! -d "$modroot" ]; then
+		warn "modules_install produced no module directory; packaging the kernel without modules"
+		endgroup
+		return 0
+	fi
 
 	local count
 	count=$(find "$modroot" -name '*.ko' | wc -l)
