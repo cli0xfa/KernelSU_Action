@@ -1,4 +1,24 @@
-# Matching the ReSukiSU manager version: what was tried and what it cost
+# Matching the ReSukiSU manager version
+
+## Result: matched, and root still works
+
+The kernel now reports **35171**, exactly the manager's own `versionCode`, while
+still booting from the `auto-hook` branch that is known to work here:
+
+```
+$ adb shell 'su -c "/data/adb/ksud debug version"'
+Kernel Version: 35171        <- the (pinned) driver version
+
+manager APK versionCode : 35171   (read from its AndroidManifest.xml)
+ksud --version          : ksud 4.2.0-rc3 (uapi: 4)
+```
+
+Verified after a permanent flash to `boot_b`: kernel
+`5.4.283-mars-g6cb9f5a9edc1`, `sys.boot_completed=1`, `su` returns
+`uid=0(root) ... context=u:r:ksu:s0`, SELinux `Enforcing`, and a root write test
+succeeds.
+
+Build: CI run **36860101959**, all steps green.
 
 ## The version mechanism (verified)
 
@@ -10,9 +30,9 @@ KSU_LOCAL_VERSION := $(shell cd $(KSU_SRC); git rev-list --count HEAD)
 KSU_VERSION       := $(shell expr 30000 + $(KSU_LOCAL_VERSION) + 700)
 ```
 
-and reports it to the manager through `do_get_info` as
-`KERNEL_SU_VERSION` (= `KSU_VERSION`). The manager compares that with its own
-build number; a mismatch shows the "kernel needs update" notice.
+and reports it to the manager as `KERNEL_SU_VERSION` (= `KSU_VERSION`) through
+`do_get_info` in `supercall/dispatch.c`. The manager compares that against its
+own `versionCode`; a mismatch produces the "kernel needs update" notice.
 
 Measured against the real repository (full clone, not shallow):
 
@@ -21,64 +41,58 @@ Measured against the real repository (full clone, not shallow):
 | `auto-hook` branch | 4375 | **35075** |
 | `v4.2.0-rc3` tag | 4471 | **35171** |
 
-The manager is `v4.2.0-rc3 (35171/4)`, so building the **tag** makes the numbers
-match exactly. CI run **36852266515** confirmed it:
+## Why choosing the ref to match does not work
 
+Building the `v4.2.0-rc3` tag does produce 35171 (CI run 36852266515 confirmed
+`-- ReSukiSU version code: 35171`), **but that kernel does not boot on this
+device**. `fastboot boot` was accepted by the bootloader and then the device fell
+through to MIUI Recovery; it never reached `sys.boot_completed`, and ADB only
+ever showed `offline`.
+
+The notable compile difference is that `v4.2.0-rc3` additionally builds
+`feature/module_load_filter.o`, which hooks module loading; on 5.4 that is the
+most likely cause. *(Not yet confirmed.)*
+
+So matching by ref forces a choice between a working kernel and a matching
+version number. Pinning the number removes the trade.
+
+## The fix
+
+`KSU_VERSION` is only ever consumed as a compiler define:
+
+```makefile
+ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 ```
--- ReSukiSU version code: 35171
--- ReSukiSU version name: v4.2.0-rc3-239e1e88-dirty@ReSukiSU
--- ReSukiSU TP Hooks on GKI 1.0: enabled by patch
-[+] ReSukiSU installed at v4.2.0-rc3 (239e1e88)
-```
 
-The build completed with every step green, and the resulting `Image` is the same
-size as the working `auto-hook` one (52765184 bytes).
+so overriding the variable is sufficient.
+`patches/resukisu_pin_version.sh` rewrites that one assignment, keeping the
+upstream expression in a comment, and `KSU_VERSION_PIN=35171` in the device
+profile sets the value. The ref stays `auto-hook`.
 
-## But the v4.2.0-rc3 kernel does not boot
+Bump `KSU_VERSION_PIN` when the manager is upgraded: a release's number is
+`30000 + (its commit count) + 700`, and the manager's own `versionCode` (readable
+from its `AndroidManifest.xml`) equals that.
 
-`fastboot boot mars-ReSukiSU-rc3-boot.img` was accepted by the bootloader
-("Sending ... OKAY / Booting OKAY") and then the device fell through to MIUI
-Recovery instead of booting. It never reached `sys.boot_completed`, and ADB only
-ever showed `offline`, then `unauthorized` (recovery's own ADB).
+The patch rejects a non-numeric value, since it ends up in a C define; refuses a
+Kbuild whose `KSU_VERSION` assignment is not shaped as expected rather than
+silently doing nothing; and can re-pin to a new value in place.
 
-So the tag builds but is not bootable on this device, while the `auto-hook`
-branch is both buildable and bootable (verified earlier: `su` returns
-`uid=0 root`, `context=u:r:ksu:s0`).
+## Things learned the hard way (relevant to any future flash)
 
-Difference in what gets compiled — both take the tracepoint branch, but:
+* **`fastboot -S <size>` corrupts the partition if the image is not sparse.**
+  It reported `Invalid sparse file format at header magic` but had already
+  written the first chunk, which left `boot_b` unbootable and dropped the device
+  into recovery. Recovery was restoring the stock image to **both** slots plus
+  both `vbmeta` partitions. Do not use `-S` without converting to a real sparse
+  image first.
+* **The bootloader caps the flash download size** between 72256 KB (works) and
+  72560 KB (rejected: `Requested download size is more than max allowed`).
+  `fastboot boot` of the same image is *not* subject to that cap, which is why a
+  kernel can boot fine yet refuse to flash. The ReSukiSU `Image` is 49152 bytes
+  larger than the v0.9.5 one, which is enough to cross the limit.
+* **The fix for the size cap is the ramdisk.** The working v0.9.5 image carried a
+  ramdisk 258159 bytes smaller than the stock one (its build had stripped
+  Magisk's ramdisk edits). Reusing that clean ramdisk with the new kernel brings
+  the total to 74039296 bytes = **72304 KB**, which flashes. Padding to a 64 KiB
+  boundary does not help, and recompressing the stock ramdisk makes it *larger*.
 
-| | `auto-hook` | `v4.2.0-rc3` |
-| --- | --- | --- |
-| `hook/inline_hook.o`, `hook/auto_hook.o` | yes | **absent** |
-| `feature/module_load_filter.o` | absent | **yes** |
-
-`feature/module_load_filter.o` is the notable addition; it hooks module loading,
-which on a 5.4 kernel may not have the internals it expects even though it
-compiles. That is the most likely candidate for the boot failure and is worth
-checking first if this path is revisited.
-
-**Nothing was written to disk** — `fastboot boot` loads into RAM only, so
-`boot_b` still holds the working `auto-hook` ReSukiSU kernel
-(`dist/mars-ReSukiSU-tp-small.img`).
-
-## Where this leaves the version question
-
-The two goals conflict on this device:
-
-* **Working root** requires the `auto-hook` branch, whose driver reports 35075.
-* **Matching the manager** requires the `v4.2.0-rc3` tag, which reports 35171 but
-  does not boot here.
-
-Options, none yet tested:
-
-1. **Keep `auto-hook` and accept the notice.** The mismatch is cosmetic in
-   practice: the manager still shows "工作中 / Built-in", lists superusers and
-   modules, and the kernel/manager fd channel works (`install fd for ksu
-   manager(uid=10274)`). This is the state the device was left in and it is
-   fully functional.
-2. **Keep `auto-hook` and override the version.** `KSU_VERSION` is just a
-   `ccflags-y += -DKSU_VERSION=...` define, so the build can pass an explicit
-   value (e.g. 35171) without changing the code. This gets an exactly matching
-   version *and* a kernel that boots — the cleanest fix if the notice matters.
-3. **Find why v4.2.0-rc3 does not boot** and fix that instead — most likely by
-   disabling `feature/module_load_filter.o` or the config that pulls it in.
