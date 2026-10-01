@@ -100,22 +100,105 @@ stock, and the only header bytes changed are those of `kernel_size`.
 
 ## Options for making root work
 
-1. **Give the hooks a target that passes `kernel_text_address()`.** The check is
-   about section placement, so the fix is to make the patched symbols land in
-   real text. This is what the source-integrated hook approach (`main`/`rc3`)
-   does instead, by calling into KernelSU from the patched call sites rather than
-   patching them — which is why those refs demand hand-patched kernel sources.
+### Option 3 is the promising one, and it is now scoped
+
+Reading ReSukiSU's hook architecture shows there are **two independent syscall
+mechanisms**, and only one of them is broken here:
+
+| Mechanism | How it installs | Result on this kernel |
+| --- | --- | --- |
+| `ksu_syscall_table_hook(nr, fn)` | overwrites `sys_call_table[nr]` via `ksu_patch_text` | **works** — `patch result=0` |
+| `ksu_inline_hook_register()` | rewrites the function prologue in place | **fails** — rejected as non-text |
+
+`ksu_register_syscall_hook(nr, fn)` does **not** patch per-syscall entries. It
+fills a routing table (`syscall_hooks[nr]`) and relies on a single shared
+dispatcher, `ksu_syscall_dispatcher`, installed once into a spare `ni_syscall`
+slot through `ksu_syscall_table_hook` — i.e. through the mechanism that works:
+
+```c
+/* arm64/syscall_hook.c */
+ksu_syscall_table_hook(ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
+...
+int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn) {
+    WRITE_ONCE(syscall_hooks[nr], fn);   /* table not touched */
+}
+```
+
+That dispatcher is generic over any `nr`. **`su` only fails because nothing
+registers `__NR_execve` with it.** `syscall_hook_manager.c` registers
+setresuid, execve, newfstatat and faccessat — but only `core/init.c`'s
+`CONFIG_KSU_TRACEPOINT_HOOK` branch calls `ksu_syscall_hook_init()` +
+`ksu_syscall_hook_manager_init()`. The `MANUAL_HOOK` branch (ours) calls
+`ksu_auto_hook_init()` instead, which is the inline-hook path that cannot work
+under CFI. And `TRACEPOINT_HOOK` is unusable because its Kbuild `$(error)`s on
+GKI 1.0.
+
+Crucially, **the execve su-handler needed for this already exists**, gated only
+behind the tracepoint config:
+
+```c
+/* feature/sucompat.c */
+#ifdef CONFIG_KSU_TRACEPOINT_HOOK
+int ksu_handle_execve_sucompat_tp_internal(const char __user **filename_user,
+                                           int orig_nr, const struct pt_regs *regs)
+{
+    ...
+    if (likely(memcmp(path, su, sizeof(su)))) goto do_orig_execve;
+    pr_info("sys_execve su found\n");
+    *filename_user = ksud_user_path();
+    ret = escape_with_root_profile();
+    ...
+    return ksu_syscall_table[orig_nr](regs);   /* the working call form */
+}
+#endif
+```
+
+So the minimal fix is to route `__NR_execve` (and `__NR_execveat`) through the
+shared dispatcher in `MANUAL_HOOK` mode, reusing
+`ksu_handle_execve_sucompat_tp_internal` — the same pattern `ksu_sys_read` and
+`ksu_sys_fstat` already use successfully in this very build. That is a patch
+against ReSukiSU's own source, not against the kernel, so it needs no hand-edited
+kernel tree and no 5.4 hook-patch port.
+
+Concretely:
+1. Drop the `#ifdef CONFIG_KSU_TRACEPOINT_HOOK` guard on
+   `ksu_handle_execve_sucompat_tp_internal` (and on its `syscall_event_bridge.c`
+   caller), or add an equivalent caller for manual mode.
+2. Call `ksu_syscall_hook_init()` in the `MANUAL_HOOK` branch of `core/init.c`,
+   then `ksu_register_syscall_hook(__NR_execve, ksu_hook_execve)` and the
+   `__NR_execveat` equivalent.
+3. Leave `ksu_auto_hook_init()` in place for the hooks that can still install
+   (the LSM ones already work: `ksu_task_fix_setuid` fires continuously in
+   dmesg), and let the inline ones fail as they do now.
+
+Not yet attempted; it is the next thing to try if a modern fork is still wanted.
+
+### The other options
+
+1. **Give the inline hooks a target that passes `kernel_text_address()`.** The
+   check is about section placement, so the fix is to make the patched symbols
+   land in real text — which is inherently what `CONFIG_CFI_CLANG` prevents for
+   these functions.
 2. **Port the hook patches for this tree.** ReSukiSU publishes
    `ReSukiSU_Patches`, but only `kernel-4.9`, `kernel-4.14`, `kernel-4.19` and
-   the GKI ones — no 5.4 — so a 5.4 patch would have to be written, and
+   the GKI ones — no 5.4 — so a 5.4 patch would have to be written.
    `KSU_HOOKS_AUTO_HOOKED=false` is already wired up to allow that.
-3. **Check whether the 5.4 syscall-table path alone can carry `su`.** The
-   syscall-table patch succeeded (`patch result=0`), so it is worth reading
-   ReSukiSU's dispatch path to see whether any configuration lets `su` bypass
-   the inline hooks entirely. Not yet investigated.
 4. **Stay on KernelSU v0.9.5**, which is flashed, verified and granting root
-   (`u:r:su:s0`) right now.
+   (`u:r:su:s0`) right now. v0.9.5 works because it hooks via **kprobes**, which
+   the kernel supports natively and which is unaffected by CFI section
+   placement — the same reason `CONFIG_KSU_HOOK_MODE=kprobes` was the right
+   choice for it.
 
 `CONFIG_CFI_PERMISSIVE` is `not set` on this kernel; note it would not help,
 since the rejection is a section-placement test in KernelSU's own sanity check,
 not a CFI trap at runtime.
+
+## The broader lesson
+
+`CONFIG_CFI_CLANG=y` + `CONFIG_LTO_CLANG=y` makes in-place function-prologue
+hooking unreliable, because `kernel_text_address()` no longer covers the
+functions being patched. Any KernelSU fork that relies on **inline hooks** will
+hit this on such a kernel; kprobes and syscall-table dispatch both avoid it.
+That is the discriminator to check first when picking a fork for this device,
+and it is worth stating in the device profile.
+
