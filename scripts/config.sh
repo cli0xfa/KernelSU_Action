@@ -37,6 +37,10 @@ declare -A DEFAULTS=(
 	# silently -- which is how a build "succeeds" while shipping a kernel with
 	# no KernelSU in it. This turns that into a hard failure.
 	[KERNEL_REQUIRED_CONFIG]=""
+	# Appended to KERNEL_REQUIRED_CONFIG rather than replacing it, so a profile
+	# that layers on another via INCLUDE can add its own assertions without
+	# having to restate (and risk drifting from) the base list.
+	[KERNEL_REQUIRED_CONFIG_EXTRA]=""
 	[KERNEL_IMAGE_NAME]="Image.gz-dtb"
 	[ARCH]="arm64"
 	[KERNEL_NAME]=""
@@ -124,13 +128,42 @@ cfg_read() {
 		| sed -E 's/[[:space:]]+$//'
 }
 
+# A profile may begin with `INCLUDE=<path>` to layer on top of another profile,
+# which keeps device profiles that differ only in the KernelSU choice from
+# duplicating two hundred lines that must otherwise be kept in sync by hand.
+#
+# Resolution order, lowest priority first: the included file, then the file
+# itself, then workflow inputs. The include is a plain single level (no
+# chaining) and its path is relative to the including file's directory.
+cfg_include_of() {
+	local file=$1
+	local inc
+	inc=$(cfg_read "$file" INCLUDE)
+	[ -n "$inc" ] || return 0
+	case "$inc" in
+		/*) printf '%s' "$inc" ;;
+		*)  printf '%s/%s' "$(dirname "$file")" "$inc" ;;
+	esac
+}
+
+# cfg_get FILE KEY -- value for KEY honouring that file's INCLUDE.
+# The file itself wins; the included file is the fallback. That ordering is
+# what makes an INCLUDE-ing profile able to override just a few keys.
+cfg_get() {
+	local file=$1 key=$2 inc val
+	val=$(cfg_read "$file" "$key")
+	[ -n "$val" ] && { printf '%s' "$val"; return 0; }
+	inc=$(cfg_include_of "$file")
+	[ -n "$inc" ] && cfg_read "$inc" "$key"
+}
+
 resolve() {
 	local key val
 	for key in "${!DEFAULTS[@]}"; do
 		val=${DEFAULTS[$key]}
 
 		local from_file
-		from_file=$(cfg_read "$CONFIG_FILE" "$key")
+		from_file=$(cfg_get "$CONFIG_FILE" "$key")
 		[ -n "$from_file" ] && val=$from_file
 
 		# Workflow inputs win over the file, but only when actually provided.
@@ -154,7 +187,7 @@ resolve() {
 	for legacy in "${!ALIASES[@]}"; do
 		modern=${ALIASES[$legacy]}
 		local lv
-		lv=$(cfg_read "$CONFIG_FILE" "$legacy")
+		lv=$(cfg_get "$CONFIG_FILE" "$legacy")
 		[ -n "$lv" ] || continue
 		case "$modern" in
 			_LEGACY_*) CFG[$modern]=$lv ;;
@@ -162,7 +195,7 @@ resolve() {
 				# Only honour the legacy spelling when the modern one is absent
 				# from the file and no input overrode it.
 				local mv in_var="IN_${modern}"
-				mv=$(cfg_read "$CONFIG_FILE" "$modern")
+				mv=$(cfg_get "$CONFIG_FILE" "$modern")
 				if [ -z "$mv" ] && [ -z "${!in_var:-}" ]; then
 					CFG[$modern]=$lv
 					debug "legacy key ${legacy} -> ${modern}=${lv}"
@@ -228,7 +261,7 @@ validate() {
 	esac
 
 	case "${CFG[KSU_HOOK_MODE]}" in
-		auto | kprobes | manual | tracepoint | syscall | none) ;;
+		auto | kprobes | manual | tracepoint | syscall | runtime | none) ;;
 		*) _err "unknown KSU_HOOK_MODE '${CFG[KSU_HOOK_MODE]}'" ;;
 	esac
 

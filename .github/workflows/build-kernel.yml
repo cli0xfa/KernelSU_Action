@@ -38,7 +38,7 @@ on:
         required: false
         default: "config"
         type: choice
-        options: [config, auto, kprobes, manual, tracepoint, syscall, none]
+        options: [config, auto, kprobes, manual, tracepoint, syscall, runtime, none]
       susfs:
         description: "Apply SUSFS (mount/root hiding)"
         required: false

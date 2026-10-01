@@ -391,13 +391,28 @@ hooks_patch_apply() {
 	fi
 
 	# SukiSU's patch repo carries per-version hook patches too.
+	#
+	# Only the per-version directory (e.g. 4.19/) is usable. The newer
+	# hooks/syscall_hooks.patch must NOT be used: every call it injects into
+	# fs/exec.c, fs/open.c, fs/stat.c, fs/read_write.c and drivers/input/input.c
+	# is wrapped in
+	#     #if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)
+	# but SukiSU-Ultra does not declare CONFIG_KSU_MANUAL_HOOK anywhere in its
+	# Kconfig -- not even on the branch whose setup.sh its own repo documents
+	# for non-GKI. The guard is therefore always false, the hooks compile out,
+	# and the kernel builds and boots cleanly while `su` silently does nothing.
+	# It would also be a no-op on this tree anyway: its fs/open.c hunk and its
+	# drivers/tty/pty.c file do not exist in a 5.4 kernel.
 	if [ "$variant" = "sukisu-ultra" ]; then
 		local dir p
 		dir=$(sukisu_patch_dir)
-		for p in "${dir}/${kver}/"*hook*.patch "${dir}/hooks/syscall_hooks.patch"; do
+		for p in "${dir}/${kver}/"*hook*.patch; do
 			[ -f "$p" ] || continue
 			if ( cd "$KERNEL_DIR" && apply_patch "$p" 1 ); then endgroup; return 0; fi
 		done
+		if [ ! -e "${dir}/${kver}" ]; then
+			info "SukiSU ships no hook patch for kernel ${kver}; using the bundled script"
+		fi
 	fi
 
 	# Fall back to the in-repo sed script, which is what this action shipped

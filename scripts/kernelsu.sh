@@ -50,9 +50,24 @@ ksu_registry() {
 		echo "https://github.com/KernelSU-Next/KernelSU-Next|dev|KernelSU-Next|dev|legacy|-|KernelSU-Next" ;;
 	sukisu-ultra)
 		# Repo moved from the personal ShirkNeko account into its own org.
-		# 'main' is the modular v4 tree (KPM, no SUSFS); 'builtin' is the
-		# non-GKI/source-integrated tree and is the only one with SUSFS Kconfig.
-		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|builtin|builtin|SukiSU-Ultra" ;;
+		#
+		# 'main' is the modern modular tree and is what legacy kernels should
+		# use: it hooks via kprobes plus runtime patching of the syscall table
+		# (hook/arm64/syscall_hook.c patches sys_call_table[nr] in place via
+		# patch_memory), so it needs NO kernel source patches at all. Its
+		# Kconfig only asks for `depends on KPROBES && EXT4_FS`.
+		#
+		# 'builtin' must not be used here. It is the source-integrated tree, and
+		# its kernel/hook/lsm_hook.c defines `is_first_zygote` only under
+		# `#if defined(CONFIG_KSU_SUSFS) && defined(KSU_COMPAT_USE_STATIC_KEY)`
+		# while runtime/ksud.c uses it under a bare `#ifdef
+		# KSU_COMPAT_USE_STATIC_KEY` -- which every 5.4 kernel satisfies. So
+		# CONFIG_KSU_SUSFS is mandatory for it to link, and builtin ships no
+		# SUSFS sources of its own: it expects susfs4ksu's kernel patch. On this
+		# device that patch does not apply -- fs/proc/fd.c hunk #3 fails even at
+		# fuzz 3 (the tree's seq_printf has 3 fields, the patch rewrites it to 4
+		# to add `ino`), and fs/proc/bootconfig.c does not exist in a 5.4 tree.
+		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|main|-|SukiSU-Ultra" ;;
 	resukisu)
 		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
 		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|-|ReSukiSU" ;;
@@ -285,6 +300,31 @@ ksu_hook_configs() {
 		;;
 	syscall)
 		kconf_enable "$defconfig" CONFIG_KSU_SYSCALL_HOOK
+		;;
+	runtime)
+		# Variants that install their own hooks at runtime and therefore need
+		# NO kernel source patching. SukiSU-Ultra's 'main' branch is the case
+		# this exists for: it registers kretprobes and patches sys_call_table
+		# in place (kernel/hook/arm64/syscall_hook.c -> patch_memory), driven
+		# by CONFIG_KPROBES plus the syscall tracepoints.
+		#
+		# It must NOT be treated as 'manual'. That resolved mode makes
+		# hooks_patch_apply() run patches/legacy_ksu_hooks.sh, which externs
+		# ksu_handle_execveat, ksu_handle_vfs_read, ksu_vfs_read_hook and
+		# ksu_input_hook. 'main' defines none of those -- it has no such
+		# functions, and its ksu_handle_faccessat takes (orig_nr, regs) rather
+		# than the legacy (dfd, filename, mode, flags) -- so the kernel would
+		# fail to link. 'auto' picks 'manual' for every pre-5.10 kernel, which
+		# is exactly why this has to be selected explicitly.
+		case "$variant" in
+			sukisu-ultra)
+				kconf_set_many "$defconfig" \
+					CONFIG_KPROBES=y CONFIG_HAVE_KPROBES=y \
+					CONFIG_KPROBE_EVENTS=y CONFIG_KRETPROBES=y \
+					CONFIG_HAVE_SYSCALL_TRACEPOINTS=y CONFIG_TRACEPOINTS=y ;;
+			*)
+				warn "hook mode 'runtime' is only meaningful for variants that hook at runtime (sukisu-ultra); ignoring for ${variant}" ;;
+		esac
 		;;
 	esac
 }

@@ -207,7 +207,7 @@ verify_required_config() {
 	if [ "${KSU_VARIANT:-none}" != "none" ]; then
 		spec="CONFIG_KSU=y"
 	fi
-	spec="${spec} ${KERNEL_REQUIRED_CONFIG:-}"
+	spec="${spec} ${KERNEL_REQUIRED_CONFIG:-} ${KERNEL_REQUIRED_CONFIG_EXTRA:-}"
 
 	[ -n "${spec// /}" ] || return 0
 
@@ -219,21 +219,18 @@ verify_required_config() {
 		esac
 		case "$sym" in CONFIG_*) ;; *) sym="CONFIG_${sym}" ;; esac
 
+		# A disabled bool is written as "# CONFIG_X is not set", not
+		# "CONFIG_X=n", so match that form too -- otherwise asking for
+		# "CONFIG_X=n" always reports 'unset' and fails on a correct .config.
 		got=$(sed -nE "s/^${sym}=(.*)$/\1/p" "$cfg" | tail -n1)
-		if [ "$want" = "y" ]; then
-			if [ "$got" = "y" ]; then
-				ok "${sym}=y"
-			else
-				warn "${sym} is not set in .config (value: '${got:-unset}')"
-				missing=$((missing + 1))
-			fi
+		if [ -z "$got" ] && grep -qE "^# ${sym} is not set$" "$cfg"; then
+			got="n"
+		fi
+		if [ "$got" = "$want" ]; then
+			ok "${sym}=${want}"
 		else
-			if [ "$got" = "$want" ]; then
-				ok "${sym}=${want}"
-			else
-				warn "${sym} is '${got:-unset}', expected '${want}'"
-				missing=$((missing + 1))
-			fi
+			warn "${sym} is '${got:-unset}', expected '${want}'"
+			missing=$((missing + 1))
 		fi
 	done
 
