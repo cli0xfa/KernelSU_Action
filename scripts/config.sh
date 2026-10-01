@@ -73,6 +73,11 @@ declare -A DEFAULTS=(
 	# Set false to force source hook patches even for a variant that normally
 	# installs its hooks at runtime (see hooks_patch_apply in patches.sh).
 	[KSU_HOOKS_AUTO_HOOKED]="true"
+	# Enable ReSukiSU's tracepoint syscall hook on a non-GKI 2.0 kernel by
+	# neutralising its GKI-2.0-only Kbuild guard. Needed on CONFIG_CFI_CLANG
+	# kernels, where the inline-hook path cannot install (see
+	# resukisu_kernel_tp_fix in patches.sh).
+	[KSU_RESUKISU_KERNEL_TP_FIX]="false"
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 

@@ -462,8 +462,56 @@ kpm_patch_image() {
 	endgroup
 }
 
-# --------------------------------------------------------------------- main ---
+# ================================================== ReSukiSU kernel tracepoint
+#
+# Lets ReSukiSU's tracepoint syscall hook build on a 5.4 kernel.
+#
+# Why it is needed: the pre-GKI default is KSU_MANUAL_HOOK, which installs hooks
+# with hook/inline_hook.c. That path gates every install on
+# kernel_text_address() for both the target and the dispatcher, and this kernel
+# builds with CONFIG_CFI_CLANG=y + CONFIG_LTO_CLANG=y, which puts those
+# functions outside the accepted ranges. On the device all 7 inline hooks were
+# refused ("inline_hook: reject non-text target=..."), including the execve one
+# that rewrites /system/bin/su -> /data/adb/ksud, so `su` could not escalate.
+#
+# The tracepoint path does not patch function text at all: it redirects at
+# syscall entry by pointing regs->syscallno at a spare ni_syscall slot holding a
+# shared dispatcher, installed with ksu_syscall_table_hook() -- the mechanism
+# that already reports `patch result=0` on this device.
+#
+# ReSukiSU refuses the mode on non-GKI 2.0 with a hard $(error). That gate is
+# about what upstream tested, not what the code needs: the hook requires the
+# sys_enter tracepoint, declared under CONFIG_HAVE_SYSCALL_TRACEPOINTS, which
+# this kernel sets. (CONFIG_FTRACE_SYSCALLS is unset here, but that only governs
+# tracefs visibility, not KernelSU registering its own probe.) The code path
+# itself uses no post-5.4 API: its only version checks already have 5.4-correct
+# fallbacks (tp_marker.c falls back to TIF_SYSCALL_TRACEPOINT below 5.11;
+# syscall_hook_manager.c includes compat.h below 6.7).
+#
+# Edits ReSukiSU's own Kbuild only. No kernel source file is touched.
+resukisu_kernel_tp_fix() {
+	local variant=${KSU_VARIANT:-none}
+	if [ "$variant" != "resukisu" ]; then
+		warn "KSU_RESUKISU_KERNEL_TP_FIX is set but KSU_VARIANT=${variant}; skipping"
+		return 0
+	fi
 
+	local ksu_dir="${KERNEL_DIR}/${KSU_DIR:-KernelSU}"
+	local script="${REPO_ROOT}/patches/resukisu_enable_tracepoint.sh"
+	[ -d "$ksu_dir" ] || die "KernelSU dir not found: ${ksu_dir}"
+	[ -f "$script" ] || die "patch script not found: ${script}"
+
+	group "Enabling ReSukiSU tracepoint hook on this kernel"
+	bash "$script" "$ksu_dir" || die "failed to enable the ReSukiSU tracepoint hook.
+       Without it the build stops on 'TP hooks are incompatible with
+       Non-GKI/GKI 1.0 kernels', and the inline-hook alternative cannot work on
+       a CONFIG_CFI_CLANG kernel."
+	ok "tracepoint hook enabled"
+	summary "| ReSukiSU hook | tracepoint (patched for non-GKI) |"
+	endgroup
+}
+
+# --------------------------------------------------------------------- main ---
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 	case "${1:-all}" in
 		susfs)        susfs_apply ;;
@@ -471,6 +519,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 		hide_stuff)   hide_stuff_apply ;;
 		hooks)        hooks_patch_apply ;;
 		watchdog)     watchdog_relax_apply ;;
+		kernel_tp)    resukisu_kernel_tp_fix ;;
 		kpm)          kpm_patch_image "$2" ;;
 		all)
 			# Order matters and this is the tested one (4.19 + SukiSU builtin
@@ -489,6 +538,14 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
 			if [ "${KSU_VARIANT:-none}" != "none" ] &&
 			   [ "${KSU_HOOK_MODE_RESOLVED:-}" = "manual" ]; then
 				hooks_patch_apply
+			fi
+
+			# Runs after hooks_patch_apply: it edits the KernelSU Kbuild, not
+			# the kernel tree, so it is independent of the hook patching above
+			# but must happen before the defconfig is generated (the Kconfig
+			# symbol it enables is asserted by KERNEL_REQUIRED_CONFIG_EXTRA).
+			if is_true "${KSU_RESUKISU_KERNEL_TP_FIX:-false}"; then
+				resukisu_kernel_tp_fix
 			fi
 
 			if is_true "${ENABLE_SUSFS:-false}";      then susfs_apply;      fi
