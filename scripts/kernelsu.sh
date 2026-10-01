@@ -327,7 +327,7 @@ ksu_fix_legacy_symbols() {
 
 	[ -f "$kbuild" ] || return 0
 
-	local need_nofault=0 need_twa=0
+	local need_nofault=0 need_twa=0 need_copy_nofault=0
 	local uaccess="${KERNEL_DIR}/include/linux/uaccess.h"
 	local twh="${KERNEL_DIR}/include/linux/task_work.h"
 
@@ -338,6 +338,23 @@ ksu_fix_legacy_symbols() {
 				need_nofault=1
 			else
 				warn "the fork calls strncpy_from_user_nofault but ${kver} declares neither it nor strncpy_from_unsafe_user"
+			fi
+		fi
+	fi
+
+	# --- copy_from_user_nofault / copy_to_user_nofault (renamed in 5.8) -----
+	# Same 5.8 rename batch as strncpy above: copy_{from,to}_user_nofault() were
+	# called probe_user_read() and probe_user_write() before it, and the
+	# signatures are identical. Without this the kernel compiles in full and
+	# then fails at the very last step:
+	#     ld.lld: error: undefined symbol: copy_to_user_nofault
+	if [ -f "$uaccess" ] && ! grep -q 'copy_from_user_nofault' "$uaccess"; then
+		if grep -rql 'copy_from_user_nofault\|copy_to_user_nofault' "${ksu_dir}/kernel" 2>/dev/null; then
+			if grep -q 'probe_user_read' "${KERNEL_DIR}/include/linux/uaccess.h" 2>/dev/null ||
+			   grep -q 'probe_user_read' "${KERNEL_DIR}/mm/maccess.c" 2>/dev/null; then
+				need_copy_nofault=1
+			else
+				warn "the fork calls copy_{from,to}_user_nofault but ${kver} declares neither them nor probe_user_{read,write}"
 			fi
 		fi
 	fi
@@ -355,7 +372,7 @@ ksu_fix_legacy_symbols() {
 		fi
 	fi
 
-	[ "$need_nofault" -eq 1 ] || [ "$need_twa" -eq 1 ] || return 0
+	[ "$need_nofault" -eq 1 ] || [ "$need_twa" -eq 1 ] || [ "$need_copy_nofault" -eq 1 ] || return 0
 
 	local hdr="${ksu_dir}/kernel/include/ksu_legacy_compat.h"
 	cat >"$hdr" <<'EOF'
@@ -366,7 +383,12 @@ ksu_fix_legacy_symbols() {
  *    the pagefault-disabled semantics are identical, so the old symbol is a
  *    faithful implementation of the new name.
  *
- * 2. task_work_add()'s third argument became `enum task_work_notify_mode` in
+ * 2. copy_from_user_nofault() and copy_to_user_nofault() are the same 5.8
+ *    rename batch: they were probe_user_read() and probe_user_write() before
+ *    it. Signatures are identical (the newer to_user form adds `notrace`,
+ *    which a macro alias does not need).
+ *
+ * 3. task_work_add()'s third argument became `enum task_work_notify_mode` in
  *    Linux 5.8 (commit 91989c707884ecc7cd537281ab1a4b8fb7219da3), which is
  *    where TWA_RESUME/TWA_SIGNAL were introduced. Before that it was a plain
  *    `bool notify`, and `true` meant exactly "notify on resume" -- i.e.
@@ -389,6 +411,19 @@ EOF
 #ifndef strncpy_from_user_nofault
 #define strncpy_from_user_nofault(dst, src, count) \
 	strncpy_from_unsafe_user((dst), (const void __user *)(src), (count))
+#endif
+EOF
+	fi
+
+	if [ "$need_copy_nofault" -eq 1 ]; then
+		cat >>"$hdr" <<'EOF'
+#ifndef copy_from_user_nofault
+#define copy_from_user_nofault(dst, src, size) \
+	probe_user_read((dst), (const void __user *)(src), (size))
+#endif
+#ifndef copy_to_user_nofault
+#define copy_to_user_nofault(dst, src, size) \
+	probe_user_write((void __user *)(dst), (src), (size))
 #endif
 EOF
 	fi
@@ -443,6 +478,7 @@ EOF
 
 	local what=""
 	[ "$need_nofault" -eq 1 ] && what="strncpy_from_user_nofault"
+	[ "$need_copy_nofault" -eq 1 ] && what="${what:+${what}, }copy_{from,to}_user_nofault"
 	[ "$need_twa" -eq 1 ] && what="${what:+${what}, }TWA_RESUME"
 	warn "added a ${what} shim for kernel ${kver}"
 	return 0
