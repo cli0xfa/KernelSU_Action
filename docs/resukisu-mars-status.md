@@ -1,204 +1,171 @@
-# ReSukiSU on mars: builds and boots, but `su` fails on inline hooks
+# ReSukiSU on mars: WORKING — verified with root
 
-Status as of 2026-10-01. Supersedes the pessimistic note in
-`sukisu-5.4-incompatibility.md` about no modern fork being viable: ReSukiSU
-**does** build and boot on this kernel. It just cannot install the one hook that
-makes `su` work.
+## Result
 
-## What was achieved
+ReSukiSU **builds, boots, and grants root** on this device. This is the first
+modern KernelSU fork to do so.
 
-CI run **36822162236** (`config/mars-miui14-resukisu.env`) completed with every
-step green — the first modern KernelSU fork to compile for this device.
-
-The ref matters: `ReSukiSU/ReSukiSU` at **`auto-hook`**, not `main`. On `main`
-and `v4.2.0-rc3`, `CONFIG_KSU_MANUAL_HOOK` pulls in
-`tools/manual_hook_check.mk`, which `$(error)`s unless `ksu_handle_execveat`,
-`ksu_handle_faccessat` and friends already appear in `fs/exec.c`, `fs/open.c`
-and `fs/stat.c` — i.e. unless the kernel source was already patched by hand.
-`auto-hook` replaces that with `tools/auto_hook_detect.mk` and gates the hard
-check behind `ifneq ($(CONFIG_KALLSYMS_ALL),y)`. This kernel sets
-`CONFIG_KALLSYMS_ALL=y`, so the check is skipped.
-
-`CONFIG_KSU_TRACEPOINT_HOOK` (ReSukiSU's own default) is not usable either: its
-Kbuild `$(error)`s with *"TP hooks are incompatible with Non-GKI/GKI 1.0
-kernels"*.
-
-## Verified working, on the device
-
-Booted with `fastboot boot` (RAM only; nothing written to disk, `boot_b` still
-holds the v0.9.5 image).
-
-| Check | Evidence |
-| --- | --- |
-| Kernel boots | `sys.boot_completed=1`, `uname -r` = `5.4.283-mars-g6cb9f5a9edc1` |
-| ReSukiSU driver live | `KernelSU: Initialized on: 5.4.283-mars-g6cb9f5a9edc1 (aarch64) with driver version: 35075` |
-| Auto-hook code ran | 29 `ksu_*` symbols in `/proc/kallsyms`, incl. `ksu_on_sys_{faccessat,newfstat,stat,fstat64,reboot}` |
-| LSM hooks installed | `ksu_task_fix_setuid`, `ksu_inode_rename`, `ksu_file_permission` present and firing |
-| Syscall table patched | `KernelSU: patch result=0` |
-| Driver actively working | dmesg: continuous `handle_setresuid`, `renameat`, `boot not completed, skip prune` |
-| Debug mode | `shell is allowed at init!` (the `CONFIG_KSU_DEBUG` auto-grant) |
-| Display / touch / boot | normal; no regressions observed |
-
-## What fails, and exactly why
-
-All **7** inline hooks are rejected at boot:
+Verified over `fastboot boot` (RAM only, nothing written to disk):
 
 ```
-ksu_hook_sys_reboot: sys_reboot target=ffffffd2da979eb0 (__arm64_sys_reboot+0x0/0x254)
-inline_hook: reject non-text target=ffffffd2da979eb0 dispatcher=ffffffd2da68365c
-ksu_hook_sys_reboot: failed to hook sys_reboot: -22
+$ adb shell '/system/bin/su -c id'
+uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
 ```
 
-identical for `execve` (both the primary target and the `CONFIG_COMPAT`
-`do_execve` fallback), `faccessat`, `newfstatat`, `newfstat` and `fstat64`.
+`u:r:ksu:s0` is **ReSukiSU's own SELinux domain**, distinct from Magisk's
+`u:r:magisk:s0` — so this is provably KernelSU root, not Magisk's. A write test
+as that root succeeded (`touch` + `rm` in `/data/local/tmp`).
 
-`hook/inline_hook.c` gates every install on:
+The kernel-side logs show the hook path doing exactly what it should:
+
+```
+KernelSU: dispatcher installed at slot 42
+KernelSU: hook_manager: ksu_hook_manager_init called
+KernelSU: hook_manager: register_syscall_regfunc kretprobe: 0
+KernelSU: registered syscall hook for nr=147   (setresuid)
+KernelSU: registered syscall hook for nr=221   (execve)
+KernelSU: registered syscall hook for nr=79    (newfstatat)
+KernelSU: registered syscall hook for nr=48    (faccessat)
+KernelSU: hook_manager: sys_enter tracepoint registered
+KernelSU: ksu_handle_stat: su->sh!
+KernelSU: faccessat su->sh!
+KernelSU: sys_execve su found
+```
+
+The last three lines are the `su` interception firing: the execve hook rewrote
+`/system/bin/su` to `/data/adb/ksud` (the `su->sh!` lines are the fallback path
+used while `/data/adb/ksud` is being resolved).
+
+Everything else still works: display (`card0-DSI-1`), touch (7 input devices),
+camera (4 `/dev/video*`), mobile data (11 `rmnet` interfaces), `sys.boot_completed=1`.
+
+Build: CI run **36836876641**, all steps green.
+Artifacts: `dist/mars-ReSukiSU-tp-boot.img`, `dist/mars-ReSukiSU-auto-hook-Image`.
+
+## How it was made to work
+
+Three separate 5.4 incompatibilities had to be fixed. Two are generic (they
+apply to any modern fork); one is specific to ReSukiSU.
+
+### 1. The hook mechanism had to change (the decisive one)
+
+The pre-GKI default is `KSU_MANUAL_HOOK`, which installs hooks with
+`hook/inline_hook.c`. On a `CONFIG_CFI_CLANG=y` + `CONFIG_LTO_CLANG=y` kernel
+that cannot work: every install is refused, because the code gates on
 
 ```c
-if (!kernel_text_address((unsigned long)target) ||
-    !kernel_text_address((unsigned long)config.dispatcher)) {
-    pr_err("inline_hook: reject non-text target=%px dispatcher=%px\n", ...);
+if (!kernel_text_address(target) || !kernel_text_address(dispatcher))
     return ERR_PTR(-EINVAL);
-}
 ```
 
-This kernel has `CONFIG_CFI_CLANG=y`, `CONFIG_CFI_CLANG_SHADOW=y` and
-`CONFIG_LTO_CLANG=y`, so those functions are not inside a range
-`kernel_text_address()` accepts, and the check returns `-EINVAL` every time.
+and those functions are not in the ranges that predicate accepts. All 7 inline
+hooks failed, including the `execve` one that rewrites `/system/bin/su`, so `su`
+had no escalation path at all.
 
-**Why that specifically breaks root:** the `execve` hook is what rewrites
-`/system/bin/su` → `/data/adb/ksud`. Without it, `su` has nothing to escalate
-through. `/system/bin/su -c id` and `/data/adb/ksud su -c id` both fail, and the
-`uid=0` that `su -c id` *does* return is **Magisk's**, not KernelSU's — its
-SELinux context is `u:r:magisk:s0`, whereas KernelSU's is `u:r:su:s0` (which the
-working v0.9.5 build does produce).
+The **tracepoint** hook does not patch function text. It redirects at syscall
+entry by pointing `regs->syscallno` at a spare `ni_syscall` slot holding a shared
+dispatcher installed via `ksu_syscall_table_hook()` — i.e. through
+`ksu_patch_text`, the mechanism that works here (`patch result=0`).
 
-## Manager compatibility is not a problem
+ReSukiSU refuses that mode on non-GKI 2.0 with a hard `$(error)`. That gate is
+about what upstream tested, not what the code needs:
 
-ReSukiSU hard-codes signatures for six managers
-(`kernel/manager/manager_sign.h`), including `tiann/KernelSU`:
+* the hook requires the `sys_enter` tracepoint, declared under
+  `CONFIG_HAVE_SYSCALL_TRACEPOINTS`, which this kernel sets.
+  `CONFIG_FTRACE_SYSCALLS` is unset, but that only governs tracefs visibility,
+  not KernelSU registering its own probe;
+* the path uses no post-5.4 API — its only two version checks already fall back
+  correctly (`tp_marker.c` → `TIF_SYSCALL_TRACEPOINT` below 5.11,
+  `syscall_hook_manager.c` → `compat.h` below 6.7);
+* arm64 is on the arch allowlist.
 
-```
-#define EXPECTED_SIZE_OFFICIAL 0x033b
-#define EXPECTED_HASH_OFFICIAL "c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6"
-```
+`patches/resukisu_enable_tracepoint.sh` neutralises that one Kbuild block.
 
-The v0.9.5 manager already installed on this device matches that exactly
-(verified by parsing the APK Signing Block v2 certificate: DER size 827 =
-0x33b, SHA-256 identical), so no new APK is needed.
+### 2. ReSukiSU's fsnotify usage
 
-## Artifacts, verified before booting
+`manager/pkg_observer.c` used `.handle_inode_event`, added to
+`struct fsnotify_ops` in **5.9**; 5.4 has only `handle_event`, with a wider
+argument list. `patches/resukisu_fix_fsnotify_ops.sh` adds a `handle_event`
+wrapper for < 5.9 and selects whichever field the kernel has. Behaviour is
+unchanged — that observer only reads the file name and `FS_ISDIR`.
 
-| File | Size |
-| --- | --- |
-| `dist/mars-ReSukiSU-auto-hook-boot.img` | 74301440 |
-| `dist/mars-ReSukiSU-auto-hook-Image` | 52765184 |
+### 3. Generic 5.8 symbol renames (handled for any fork)
 
-The boot image was built with `tools/make-bootimg.py` and checked: the kernel
-region matches the CI `Image` byte-for-byte, the ramdisk is byte-identical to
-stock, and the only header bytes changed are those of `kernel_size`.
+`ksu_fix_legacy_includes()` and `ksu_fix_legacy_symbols()` in
+`scripts/kernelsu.sh`, applying only when the kernel being built genuinely lacks
+the modern name:
 
-## Options for making root work
-
-### Option 3 is the promising one, and it is now scoped
-
-Reading ReSukiSU's hook architecture shows there are **two independent syscall
-mechanisms**, and only one of them is broken here:
-
-| Mechanism | How it installs | Result on this kernel |
+| Modern name | 5.4 name | Where it bit |
 | --- | --- | --- |
-| `ksu_syscall_table_hook(nr, fn)` | overwrites `sys_call_table[nr]` via `ksu_patch_text` | **works** — `patch result=0` |
-| `ksu_inline_hook_register()` | rewrites the function prologue in place | **fails** — rejected as non-text |
+| `<linux/pgtable.h>` | part of `asm/pgtable.h` (split in 5.8) | `feature/sucompat.c` |
+| `<linux/hex.h>` | `bin2hex` in `linux/kernel.h` (added 5.9) | `manager/apk_sign.c` |
+| `strncpy_from_user_nofault()` | `strncpy_from_unsafe_user()` | `feature/sucompat.c` |
+| `copy_from_user_nofault()` | `probe_user_read()` | `runtime/ksud_integration.c` |
+| `copy_to_user_nofault()` | `probe_user_write()` | `runtime/ksud_integration.c` |
+| `TWA_RESUME` | `true` (enum added in 5.8) | `policy/allowlist.c` |
 
-`ksu_register_syscall_hook(nr, fn)` does **not** patch per-syscall entries. It
-fills a routing table (`syscall_hooks[nr]`) and relies on a single shared
-dispatcher, `ksu_syscall_dispatcher`, installed once into a spare `ni_syscall`
-slot through `ksu_syscall_table_hook` — i.e. through the mechanism that works:
+The last two only surfaced at the **final vmlinux link**
+(`ld.lld: undefined symbol: copy_to_user_nofault`), after the whole kernel had
+compiled.
 
-```c
-/* arm64/syscall_hook.c */
-ksu_syscall_table_hook(ksu_dispatcher_nr, (syscall_fn_t)ksu_syscall_dispatcher, NULL);
-...
-int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn) {
-    WRITE_ONCE(syscall_hooks[nr], fn);   /* table not touched */
-}
+## Full-tree audit: no other API gaps exist
+
+An exhaustive pass over every externally-referenced symbol, struct member, enum
+and signature in the ReSukiSU tree against the real 5.4 headers found **no
+remaining post-5.4 API use**. Notable verifications:
+
+* `PT_REGS_PARM1..6` / `PT_REGS_ORIG_SYSCALL` / `PT_REGS_RC` do **not** exist in
+  this tree's `asm/ptrace.h`, but the driver defines them itself in
+  `include/arch.h:114-139`, mapping onto real 5.4 `struct pt_regs` members
+  (`regs[31]`, `sp`, `pc`, `orig_x0`, `syscallno`). Valid — this is what makes
+  the tracepoint path work.
+* `register_trace_prio_sys_enter` and the syscall tracepoints exist.
+* `security_add_hooks` is 3-arg; the driver takes that branch.
+* `path_mount` (5.9+) is absent but handled by a `__weak` shim.
+* `seccomp_cache.c` compiles to nothing below 5.10 (whole file guarded).
+* Every `tools/kernel_compat.mk` probe resolves correctly for this tree.
+
+## Flashing: one new constraint, not yet resolved
+
+`fastboot flash boot_b` of the ReSukiSU image is **rejected by the bootloader**:
+
+```
+Sending 'boot_b' (72560 KB)   FAILED (remote: 'Requested download size is more than max allowed')
 ```
 
-That dispatcher is generic over any `nr`. **`su` only fails because nothing
-registers `__NR_execve` with it.** `syscall_hook_manager.c` registers
-setresuid, execve, newfstatat and faccessat — but only `core/init.c`'s
-`CONFIG_KSU_TRACEPOINT_HOOK` branch calls `ksu_syscall_hook_init()` +
-`ksu_syscall_hook_manager_init()`. The `MANUAL_HOOK` branch (ours) calls
-`ksu_auto_hook_init()` instead, which is the inline-hook path that cannot work
-under CFI. And `TRACEPOINT_HOOK` is unusable because its Kbuild `$(error)`s on
-GKI 1.0.
+`fastboot boot` of the *same* image works, so the bootloader accepts the content
+— this is a size cap on the `flash` download path. The working v0.9.5 image is
+72256 KB and flashed fine, so the cap lies between 72256 KB and 72560 KB.
+ReSukiSU's `Image` is 49152 bytes larger than v0.9.5's; padding to a 64 KiB
+boundary did not help, and recompressing the ramdisk makes it larger (the stock
+ramdisk is already optimally compressed).
 
-Crucially, **the execve su-handler needed for this already exists**, gated only
-behind the tracepoint config:
+Options, in order of preference:
 
-```c
-/* feature/sucompat.c */
-#ifdef CONFIG_KSU_TRACEPOINT_HOOK
-int ksu_handle_execve_sucompat_tp_internal(const char __user **filename_user,
-                                           int orig_nr, const struct pt_regs *regs)
-{
-    ...
-    if (likely(memcmp(path, su, sizeof(su)))) goto do_orig_execve;
-    pr_info("sys_execve su found\n");
-    *filename_user = ksud_user_path();
-    ret = escape_with_root_profile();
-    ...
-    return ksu_syscall_table[orig_nr](regs);   /* the working call form */
-}
-#endif
-```
+1. **Shrink the kernel under the cap.** `CONFIG_KSU_DEBUG` is a verification-only
+   feature (it is what auto-grants root to adb shell) and is no longer needed now
+   that root is proven; dropping it, and any other optional feature, should
+   recover far more than the ~1 KB of margin required.
+2. **Use the AnyKernel3 zip** via a custom recovery, which has no such cap.
+3. `fastboot boot` the image and flash from the booted system with `dd`, since
+   the kernel is verified working.
 
-So the minimal fix is to route `__NR_execve` (and `__NR_execveat`) through the
-shared dispatcher in `MANUAL_HOOK` mode, reusing
-`ksu_handle_execve_sucompat_tp_internal` — the same pattern `ksu_sys_read` and
-`ksu_sys_fstat` already use successfully in this very build. That is a patch
-against ReSukiSU's own source, not against the kernel, so it needs no hand-edited
-kernel tree and no 5.4 hook-patch port.
+## IMPORTANT — device state at the time of writing
 
-Concretely:
-1. Drop the `#ifdef CONFIG_KSU_TRACEPOINT_HOOK` guard on
-   `ksu_handle_execve_sucompat_tp_internal` (and on its `syscall_event_bridge.c`
-   caller), or add an equivalent caller for manual mode.
-2. Call `ksu_syscall_hook_init()` in the `MANUAL_HOOK` branch of `core/init.c`,
-   then `ksu_register_syscall_hook(__NR_execve, ksu_hook_execve)` and the
-   `__NR_execveat` equivalent.
-3. Leave `ksu_auto_hook_init()` in place for the hooks that can still install
-   (the LSM ones already work: `ksu_task_fix_setuid` fires continuously in
-   dmesg), and let the inline ones fail as they do now.
+The device is in **fastboot mode but not responding to fastboot commands**. It
+enumerates on USB as `Android Bootloader Interface`
+(`USB\VID_18D1&PID_D00D\E655E794`) but `fastboot devices` lists nothing, and
+`fastboot reboot` hangs. This followed a `fastboot -S 8M flash` attempt, which
+rejected the non-sparse image ("Invalid sparse file format at header magic").
 
-Not yet attempted; it is the next thing to try if a modern fork is still wanted.
+Programmatic recovery was tried and did not work: ADB server restart, USB device
+disable/enable (the PnP cycle failed), and repeated waits. It needs a
+**physical action**: hold Power + Volume Up for ~10-15 seconds to leave
+fastboot, then reboot normally; or hold Power alone for ~10 seconds to force a
+reboot. Re-plugging the USB cable may also help.
 
-### The other options
-
-1. **Give the inline hooks a target that passes `kernel_text_address()`.** The
-   check is about section placement, so the fix is to make the patched symbols
-   land in real text — which is inherently what `CONFIG_CFI_CLANG` prevents for
-   these functions.
-2. **Port the hook patches for this tree.** ReSukiSU publishes
-   `ReSukiSU_Patches`, but only `kernel-4.9`, `kernel-4.14`, `kernel-4.19` and
-   the GKI ones — no 5.4 — so a 5.4 patch would have to be written.
-   `KSU_HOOKS_AUTO_HOOKED=false` is already wired up to allow that.
-4. **Stay on KernelSU v0.9.5**, which is flashed, verified and granting root
-   (`u:r:su:s0`) right now. v0.9.5 works because it hooks via **kprobes**, which
-   the kernel supports natively and which is unaffected by CFI section
-   placement — the same reason `CONFIG_KSU_HOOK_MODE=kprobes` was the right
-   choice for it.
-
-`CONFIG_CFI_PERMISSIVE` is `not set` on this kernel; note it would not help,
-since the rejection is a section-placement test in KernelSU's own sanity check,
-not a CFI trap at runtime.
-
-## The broader lesson
-
-`CONFIG_CFI_CLANG=y` + `CONFIG_LTO_CLANG=y` makes in-place function-prologue
-hooking unreliable, because `kernel_text_address()` no longer covers the
-functions being patched. Any KernelSU fork that relies on **inline hooks** will
-hit this on such a kernel; kprobes and syscall-table dispatch both avoid it.
-That is the discriminator to check first when picking a fork for this device,
-and it is worth stating in the device profile.
-
+**Nothing was written to any partition by the failed flashes** — the bootloader
+rejected them before writing, so `boot_b` still holds the verified v0.9.5
+KernelSU image (md5 `105ADA15EE914A5CCB96176E510CC224`), which is what the
+device will boot into once it leaves fastboot. If it does not, recovery images
+are in `_backup_mars/` (`boot_b.img` etc.).
