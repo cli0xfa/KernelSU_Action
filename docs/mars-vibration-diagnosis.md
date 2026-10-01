@@ -155,3 +155,32 @@ dmesg | grep -c 'haptic_start enter'
 # does the driver ever fail to stop?
 dmesg | grep -c 'do not enter standby'   # must be 0
 ```
+
+## Mitigation applied
+
+The device carried an unusual value that matches the reported trigger:
+
+```
+haptic_feedback_infinite_intensity=1.02
+```
+
+That was removed, leaving:
+
+```
+haptic_feedback_disable=0
+haptic_feedback_enabled=0      # touch feedback off
+```
+
+After that, a normal vibration still starts and stops cleanly, and a 15-second
+idle sample shows the loop inactive:
+
+```
+GO=0x00 GLB=0x00        (at rest, both samples)
+upload_effect        +0
+cancelled_superseded +0
+'do not enter standby' count: 0
+```
+
+If the runaway returns, the same setting is the first thing to check, and the
+underlying cause to chase is whatever re-issues
+`TAG=haptic_feedback_config_strength` from `com.android.settings`.

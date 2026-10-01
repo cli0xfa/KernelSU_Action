@@ -1,5 +1,33 @@
 # Reporting UAPI 4 from the auto-hook branch — why it is honest
 
+## Result: verified on the device
+
+The kernel now reports UAPI 4, matching the manager, and root still works. Read
+back from the flashed kernel:
+
+```
+$ adb shell 'su -c "/data/adb/ksud debug info"'
+version: 35171
+full_version: v4.1.0-9d159b41-dirty@ReSukiSU
+flags: 0x0
+uapi_version: 4          <- was 2
+features: 0x5
+lkm: false               <- built-in, as assumed
+bundled: false           <- would be false either way, as predicted
+late_load: false
+runtime_mode: built-in
+pr_build: false
+```
+
+with `su -c id` → `uid=0(root) ... context=u:r:ksu:s0`, SELinux `Enforcing`, and
+the manager connected (`install fd for ksu manager`).
+
+Since the manager's test is `isManager && kernelUAPIVersion == managerUAPIVersion`
+and both sides now report 4, the Modules and Superuser tabs are no longer hidden.
+
+Build: CI run **36875939048**, all steps green. Flashed to `boot_b` and
+re-verified after a reboot.
+
 ## The problem
 
 The ReSukiSU manager showed **"需要更新内核"** and — far worse — **hid the Modules
@@ -28,6 +56,10 @@ The two sides were:
 | --- | --- |
 | `auto-hook` branch kernel | **2** |
 | `v4.2.0-rc3` manager | **4** |
+
+Note that pinning the *version code* (`KSU_VERSION_PIN`) did nothing for this —
+it is a different field. That mistake cost a build cycle.
+
 
 ## Why matching by ref does not work
 
