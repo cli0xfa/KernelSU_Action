@@ -507,6 +507,16 @@ resukisu_kernel_tp_fix() {
        Non-GKI/GKI 1.0 kernels', and the inline-hook alternative cannot work on
        a CONFIG_CFI_CLANG kernel."
 	ok "tracepoint hook enabled"
+
+	# Same idea, different upstream API drift: fsnotify_ops gained
+	# handle_inode_event in 5.9, and ReSukiSU uses it unguarded.
+	local fs="${REPO_ROOT}/patches/resukisu_fix_fsnotify_ops.sh"
+	[ -f "$fs" ] || die "patch script not found: ${fs}"
+	bash "$fs" "$ksu_dir" || die "failed to fix ReSukiSU's fsnotify usage.
+       On 5.4 the build stops on 'field designator handle_inode_event does not
+       refer to any field in type struct fsnotify_ops'."
+	ok "fsnotify ops adapted for this kernel"
+
 	summary "| ReSukiSU hook | tracepoint (patched for non-GKI) |"
 	endgroup
 }
