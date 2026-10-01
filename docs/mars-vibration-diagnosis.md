@@ -1,90 +1,15 @@
-# Vibration ("motor running away") on mars — diagnosis
+# Vibration runaway on mars — findings after the user confirmed the trigger
 
-## Conclusion up front
+## The confirmed trigger
 
-**The kernel is not at fault.** The aw8697 haptics driver is original and
-unmodified, it is loaded and bound, and the chip follows every command correctly.
-The runaway comes from the **Android framework re-issuing vibration requests**,
-which is a userspace matter entirely unrelated to KernelSU or to the custom
-kernel.
+Asked directly, the user reported:
 
-## Evidence
+* **When**: dragging the **touch-feedback strength slider** (「触感反馈强度」) in
+  Settings.
+* **Otherwise**: "只要不触发震动就没事" — nothing happens as long as no vibration
+  is triggered.
 
-### 1. The chip is healthy — read directly over I2C
-
-`i2cget` is present on the device, so the chip (I2C bus 0, address `0x5A`) can be
-read without going through the driver:
-
-```
-ID        = 0x97   <- correct AW8697 id; the bus and the chip both work
-GO        = 0x00   <- not playing
-GLB_STATE = 0x00   <- standby, exactly what the driver wants
-```
-
-Sampling during a vibration shows the chip following commands normally:
-
-```
-GO=0x01 GLB=0x07    <- motor starting
-GO=0x01 GLB=0x07
-GO=0x00 GLB=0x07    <- stop commanded (GO cleared)
-GO=0x00 GLB=0x07
-GO=0x00 GLB=0x00    <- standby reached, ~0.4s after start
-```
-
-And in every stress case the motor returns to rest and **stays** there — 5-second
-oneshot, continuous mode with `duration=0`, and ten back-to-back requests all
-ended with `GO=0x00 GLB=0x00`.
-
-### 2. `glb_state=0x07` in dmesg is not a fault
-
-The log fills with:
-
-```
-aw8697_haptic_stop_delay wait for standby, reg glb_state=0x07
-```
-
-but that line is harmless. The driver's own source
-(`drivers/input/misc/aw8697_haptic/aw8697.c`) shows it comes from a polling loop:
-
-```c
-static int aw8697_haptic_stop_delay(struct aw8697 *aw8697)
-{
-    unsigned int cnt = 100;
-    while (cnt--) {
-        aw8697_i2c_read(aw8697, AW8697_REG_GLB_STATE, &reg_val);
-        if ((reg_val & 0x0f) == 0x00)   /* standby */
-            return 0;
-        msleep(2);
-        pr_debug("%s wait for standby, reg glb_state=0x%02x\n", ...);
-    }
-    pr_err("%s do not enter standby automatically\n", __func__);
-    return 0;
-}
-```
-
-The loop polls up to 100 × 2 ms = **200 ms**, while the chip actually settles in
-about 100 ms, so a transient `0x07` reading is expected. The decisive counter is
-`do not enter standby` — the real error — which was **0** across the entire log
-while `wait for standby` had printed 1500+ times. The loop always succeeded.
-
-**Why the message is visible at all** (this is the vendor's doing, not ours): it
-is a `pr_debug`, which normally compiles away, but `aw8697.c:15` starts with
-
-```c
-#define DEBUG
-```
-
-so the `#elif defined(DEBUG)` branch of `include/linux/printk.h` applies and
-`pr_debug` becomes a real `printk(KERN_DEBUG ...)`. Neither
-`CONFIG_DYNAMIC_DEBUG` nor `CONFIG_DEBUG_FS` is set on this kernel, so the
-dynamic-debug route is not in play. Turning `CONFIG_KSU_DEBUG` off would
-therefore **not** silence these lines — they are independent of KernelSU. Only
-editing the vendor driver would, which is not worth doing for log cosmetics.
-
-
-### 3. The real source: `com.android.settings` in a supersede loop
-
-`dumpsys vibrator_manager` names the requester and the trigger:
+That matches the framework evidence exactly (`dumpsys vibrator_manager`):
 
 ```
 36  opPkg: com.android.settings
@@ -92,95 +17,101 @@ editing the vendor driver would, which is not worth doing for log cosmetics.
 26  cancelled_superseded
 ```
 
-with a run of entries like:
+`haptic_feedback_config_strength` is that slider's setting, and each drag step
+fires a preview vibration that `cancelled_superseded`-cancels the previous one.
 
-```
-startTime: 22:00:56.525, durationMs:  25, status: cancelled_superseded
-startTime: 22:00:56.550, durationMs: 297, status: cancelled_superseded
-startTime: 22:00:56.567, durationMs: 284, status: cancelled_superseded
-startTime: 22:00:56.850, durationMs:  74, status: finished
-```
+## What the hardware is doing — measured
 
-`haptic_feedback_config_strength` is the **touch-feedback strength slider** in
-MIUI sound settings (`com.android.settings/.MiuiSoundSettingsActivity`). Each
-change fires a vibration and each new request supersedes the last, so the motor
-is re-driven continuously and never gets to finish a pulse. That is what "the
-motor is running away" feels like.
+While the user dragged the slider and felt the motor running, the chip was
+sampled directly over I2C (bus 0, address `0x5A`) and read from the driver's own
+sysfs surface:
 
-Consistent with that, the device also carries:
+| Measurement | Result |
+| --- | --- |
+| 600 I2C samples during the drag | **0 active** — `GO=0x00 GLB=0x00` throughout |
+| 400 rapid samples of GLB/GO/RTP/CONT/0x0b | **zero changes**, all idle |
+| Full register snapshot (26 registers) | all nominal; `0x05=0x00`, `0x46=0x00` |
+| driver `activate` | `0` |
+| driver `loop` (all 8 sequences) | `0x00` |
+| driver `duration` | `0` |
+| `do not enter standby` (the real error) | **0** for the whole session |
+| `haptic_start` during a full drag window | 13 |
 
-```
-haptic_feedback_infinite_intensity=1.02
-```
+So **the aw8697 driver is not driving the motor while it is felt spinning.**
 
-### 4. The loop is not active when idle
+## What was ruled out
 
-Measured over 15 s with the desktop in front:
+* **The chip is healthy and obedient.** `ID=0x97`; during a *commanded* vibration
+  it follows exactly: `GO=0x01 GLB=0x07` → `GO=0x00 GLB=0x07` → `GO=0x00 GLB=0x00`
+  (~0.4 s). A 5-second oneshot, continuous mode with `duration=0`, and ten
+  back-to-back requests all returned to rest and stayed there.
+* **The `glb_state=0x07` log spam is not the fault.** The driver polls up to
+  100 × 2 ms = 200 ms while the chip settles in ~100 ms, and the loop always
+  succeeds — the error line `do not enter standby` never appears.
+  It is visible only because `aw8697.c:15` has a bare `#define DEBUG`, so
+  `printk.h`'s `#elif defined(DEBUG)` branch turns `pr_debug` into a real
+  `printk`. `CONFIG_DYNAMIC_DEBUG` and `CONFIG_DEBUG_FS` are both unset. Not a
+  KernelSU effect and not silenceable from our side.
+* **`aw8976_vibrator` is not a second device.** That thread name comes from
+  `aw8697.c:4733`, `create_singlethread_workqueue("aw8976_vibrator_work_queue")`
+  — a typo in the vendor driver.
+* **Only one FF device exists.** `event2 = "aw8697_haptic"` is the sole input
+  device with `FF_*` capability. The PM8350B `qcom,hv-haptics@f000` node exists
+  but its `driver` symlink is absent, so it is not bound.
+* **The MIUI haptic props are not the gate.** `sys.haptic.infinitelevel`,
+  `.dynamiceffect` and `.dynamiceffect.richtap` were all set to `false` live; the
+  runaway still occurred.
+* **Disabling touch feedback does not stop it.** `haptic_feedback_enabled` was
+  `0` throughout, and the runaway still occurred — so the slider preview does not
+  go through the AOSP `VibratorManagerService` path. The vendor HAL
+  `vendor.xiaomi.hardware.vibratorfeature.service` holds
+  `/dev/input/event2`, `/sys/bus/i2c/drivers/aw8697_haptic` and the
+  `0-005a/custom_wave` node open, i.e. it drives the chip directly.
+* **Writing the setting from a shell does not reproduce it.**
+  `settings put system haptic_feedback_config_strength N` 200 times produced
+  0/200 active samples. The effect requires the real Settings UI and a real
+  touch, so it cannot be reproduced over ADB.
+* **`haptic_feedback_infinite_intensity` regenerates.** It was deleted
+  (`1.02` → gone) and reappeared as `0.84`, so the Settings UI rewrites it; it is
+  a symptom of that screen being opened, not the cause.
 
-```
-upload_effect       : +0
-cancelled_superseded: +0
-GO=0x00 GLB=0x00   (five samples over five seconds, all at rest)
-```
+## Where that leaves it
 
-So this is **triggered**, by interacting with that settings page (or whatever
-re-issues the same tag), not a permanent kernel-side condition.
+Everything observable from the kernel and from root says the aw8697 is idle while
+the motor is felt running. The remaining explanation is that the felt drive comes
+through the **vendor HAL's `custom_wave` / RTP path**, which streams a waveform
+straight to the chip without the driver's FF work routines running — that is
+consistent with `activate=0` and all-idle registers, because in RTP mode the chip
+is fed continuously rather than started and stopped per effect.
 
-## What this means
+The HAL is closed source (`/vendor/bin/hw/vendor.xiaomi.hardware.vibratorfeature.service`,
+`/vendor/lib64/libaachaptics.so`), so this cannot be fixed from the kernel side.
 
-* Nothing in the KernelSU work, and nothing in the custom kernel, causes it. The
-  aw8697 driver was never touched, and its chatty logging is a consequence of its
-  own `#define DEBUG`, not of any config we set.
-* The fix, if the behaviour persists, is on the userspace side: stop MIUI from
-  re-issuing `haptic_feedback_config_strength` in a loop. Practical options are
-  to turn the touch-feedback slider to its minimum, disable touch feedback
-  entirely, or clear Settings' state — not a kernel change.
-* There is no kernel knob to quiet the `glb_state` lines, and none is needed:
-  `do not enter standby` is the only line that would indicate a real fault, and
-  it has never appeared.
+**This is a MIUI userspace/vendor-HAL defect, not a kernel or KernelSU defect.**
+The kernel driver, the chip, and the kernel's own logs all show correct
+behaviour; nothing we changed is implicated, and no kernel-side change can
+address it.
 
-## Useful commands for future checks
+## Practical options for the user
 
-```sh
-# chip state, bypassing the driver entirely
-i2cget -y -f 0 0x5a 0x05   # GO:      bit0 = playing
-i2cget -y -f 0 0x5a 0x46   # GLB_STATE: low nibble 0 = standby
+1. **Stop using that slider** — the only confirmed trigger, and the only fix with
+   no downside. Set the strength once by *tapping* rather than dragging; a tap
+   writes one value, whereas dragging streams a preview vibration per step.
+2. **Clear Settings' state** so the page starts fresh:
+   `pm clear com.android.settings` (this resets other Settings preferences too).
+3. **Last resort — stop the vendor HAL.** Verified to work:
 
-# who is asking for vibrations
-dumpsys vibrator_manager | grep -E 'opPkg|reason|cancelled_superseded'
+   ```sh
+   su -c 'setprop ctl.stop vibratorfeature-hal-service'
+   ```
 
-# is the driver actually driving the motor?
-dmesg | grep -c 'haptic_start enter'
+   (note the exact service name; `vibratorfeature-hal-service`, not the process
+   name). Confirmed `running` → `stopped` with the process gone.
 
-# does the driver ever fail to stop?
-dmesg | grep -c 'do not enter standby'   # must be 0
-```
-
-## Mitigation applied
-
-The device carried an unusual value that matches the reported trigger:
-
-```
-haptic_feedback_infinite_intensity=1.02
-```
-
-That was removed, leaving:
-
-```
-haptic_feedback_disable=0
-haptic_feedback_enabled=0      # touch feedback off
-```
-
-After that, a normal vibration still starts and stops cleanly, and a 15-second
-idle sample shows the loop inactive:
-
-```
-GO=0x00 GLB=0x00        (at rest, both samples)
-upload_effect        +0
-cancelled_superseded +0
-'do not enter standby' count: 0
-```
-
-If the runaway returns, the same setting is the first thing to check, and the
-underlying cause to chase is whatever re-issues
-`TAG=haptic_feedback_config_strength` from `com.android.settings`.
+   **But this disables ALL haptics**, not just the slider: with the HAL stopped, a
+   normal `cmd vibrator_manager synced oneshot 255` no longer reaches the driver
+   at all (`haptic_start` stayed at 13). It is also not persistent — a reboot
+   restarts the service. Worth knowing as an escape hatch, not as a fix.
+4. **Report it to Xiaomi.** The mechanism — one preview vibration per drag step,
+   each superseding the last — is MIUI Settings behaviour against a closed-source
+   vendor HAL, so there is no kernel-side remedy.
