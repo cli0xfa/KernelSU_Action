@@ -88,6 +88,12 @@ declare -A DEFAULTS=(
 	# for the accepted names. Empty means "change nothing" -- this is a
 	# diagnostic switch, not a supported configuration.
 	[KSU_BISECT_SWITCHES]=""
+	# Report a different KERNEL_SU_UAPI_VERSION than the fork computes. Required
+	# because the manager compares uapi versions (not version codes) and hides
+	# its Modules/Superuser tabs on a mismatch. Empty means "leave it alone".
+	# Only safe when the UAPI headers genuinely match; see
+	# patches/resukisu_uapi_version.sh for the evidence required.
+	[KSU_UAPI_VERSION]=""
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 

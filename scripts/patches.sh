@@ -545,6 +545,19 @@ resukisu_kernel_tp_fix() {
 		summary "| bisect | ${KSU_BISECT_SWITCHES} |"
 	fi
 
+	# Report the UAPI version the installed manager expects. Matters because the
+	# manager gates its Modules and Superuser tabs on a uapi match, not on the
+	# version code. See patches/resukisu_uapi_version.sh for why this is honest
+	# on this tree rather than just cosmetic.
+	if [ -n "${KSU_UAPI_VERSION:-}" ]; then
+		local uv="${REPO_ROOT}/patches/resukisu_uapi_version.sh"
+		[ -f "$uv" ] || die "patch script not found: ${uv}"
+		bash "$uv" "$ksu_dir" "${KSU_UAPI_VERSION}" \
+			|| die "failed to set the UAPI version to ${KSU_UAPI_VERSION}"
+		ok "UAPI version reported as ${KSU_UAPI_VERSION}"
+		summary "| ReSukiSU UAPI | ${KSU_UAPI_VERSION} |"
+	fi
+
 	summary "| ReSukiSU hook | tracepoint (patched for non-GKI) |"
 	endgroup
 }

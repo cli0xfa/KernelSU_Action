@@ -43,9 +43,8 @@ The log fills with:
 aw8697_haptic_stop_delay wait for standby, reg glb_state=0x07
 ```
 
-but that is a **`pr_debug`**, visible only because `CONFIG_KSU_DEBUG=y` turns on
-dynamic debug. The driver's own source (`drivers/input/misc/aw8697_haptic/aw8697.c`)
-explains it:
+but that line is harmless. The driver's own source
+(`drivers/input/misc/aw8697_haptic/aw8697.c`) shows it comes from a polling loop:
 
 ```c
 static int aw8697_haptic_stop_delay(struct aw8697 *aw8697)
@@ -64,9 +63,24 @@ static int aw8697_haptic_stop_delay(struct aw8697 *aw8697)
 ```
 
 The loop polls up to 100 × 2 ms = **200 ms**, while the chip actually settles in
-about 100 ms. So each `0x07` reading is a normal transient. The decisive counter:
-`do not enter standby` — the actual error — was **0** across the whole log, while
-`wait for standby` had been printed 1500+ times. The loop always succeeded.
+about 100 ms, so a transient `0x07` reading is expected. The decisive counter is
+`do not enter standby` — the real error — which was **0** across the entire log
+while `wait for standby` had printed 1500+ times. The loop always succeeded.
+
+**Why the message is visible at all** (this is the vendor's doing, not ours): it
+is a `pr_debug`, which normally compiles away, but `aw8697.c:15` starts with
+
+```c
+#define DEBUG
+```
+
+so the `#elif defined(DEBUG)` branch of `include/linux/printk.h` applies and
+`pr_debug` becomes a real `printk(KERN_DEBUG ...)`. Neither
+`CONFIG_DYNAMIC_DEBUG` nor `CONFIG_DEBUG_FS` is set on this kernel, so the
+dynamic-debug route is not in play. Turning `CONFIG_KSU_DEBUG` off would
+therefore **not** silence these lines — they are independent of KernelSU. Only
+editing the vendor driver would, which is not worth doing for log cosmetics.
+
 
 ### 3. The real source: `com.android.settings` in a supersede loop
 
@@ -115,15 +129,15 @@ re-issues the same tag), not a permanent kernel-side condition.
 ## What this means
 
 * Nothing in the KernelSU work, and nothing in the custom kernel, causes it. The
-  aw8697 driver was never touched — the only reason its debug lines are visible
-  at all is `CONFIG_KSU_DEBUG=y`, which I enabled to prove root.
+  aw8697 driver was never touched, and its chatty logging is a consequence of its
+  own `#define DEBUG`, not of any config we set.
 * The fix, if the behaviour persists, is on the userspace side: stop MIUI from
   re-issuing `haptic_feedback_config_strength` in a loop. Practical options are
   to turn the touch-feedback slider to its minimum, disable touch feedback
   entirely, or clear Settings' state — not a kernel change.
-* To remove the misleading log noise, drop `CONFIG_KSU_DEBUG` from the profile
-  (it is no longer needed now that root is proven). The `glb_state` lines are
-  `pr_debug` and would then be silent.
+* There is no kernel knob to quiet the `glb_state` lines, and none is needed:
+  `do not enter standby` is the only line that would indicate a real fault, and
+  it has never appeared.
 
 ## Useful commands for future checks
 
