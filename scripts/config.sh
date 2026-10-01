@@ -78,6 +78,11 @@ declare -A DEFAULTS=(
 	# kernels, where the inline-hook path cannot install (see
 	# resukisu_kernel_tp_fix in patches.sh).
 	[KSU_RESUKISU_KERNEL_TP_FIX]="false"
+	# Pin the driver's reported KSU_VERSION, overriding what the fork computes
+	# from its commit count. Set this to match the installed manager's build
+	# number so it stops reporting a kernel mismatch. Empty means "leave the
+	# fork's own value alone".
+	[KSU_VERSION_PIN]=""
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 

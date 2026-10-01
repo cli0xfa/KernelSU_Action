@@ -493,6 +493,9 @@ resukisu_kernel_tp_fix() {
 	local variant=${KSU_VARIANT:-none}
 	if [ "$variant" != "resukisu" ]; then
 		warn "KSU_RESUKISU_KERNEL_TP_FIX is set but KSU_VARIANT=${variant}; skipping"
+		if [ -n "${KSU_VERSION_PIN:-}" ]; then
+			warn "KSU_VERSION_PIN is only implemented for resukisu; ignoring it"
+		fi
 		return 0
 	fi
 
@@ -516,6 +519,18 @@ resukisu_kernel_tp_fix() {
        On 5.4 the build stops on 'field designator handle_inode_event does not
        refer to any field in type struct fsnotify_ops'."
 	ok "fsnotify ops adapted for this kernel"
+
+	# Pin the version the driver reports, so it matches the installed manager
+	# without having to build the exact ref that manager came from (which on
+	# this device does not boot). Driven by KSU_VERSION_PIN.
+	if [ -n "${KSU_VERSION_PIN:-}" ]; then
+		local pv="${REPO_ROOT}/patches/resukisu_pin_version.sh"
+		[ -f "$pv" ] || die "patch script not found: ${pv}"
+		bash "$pv" "$ksu_dir" "${KSU_VERSION_PIN}" \
+			|| die "failed to pin KSU_VERSION to ${KSU_VERSION_PIN}"
+		ok "driver version pinned to ${KSU_VERSION_PIN}"
+		summary "| ReSukiSU version | pinned to ${KSU_VERSION_PIN} |"
+	fi
 
 	summary "| ReSukiSU hook | tracepoint (patched for non-GKI) |"
 	endgroup

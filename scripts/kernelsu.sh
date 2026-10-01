@@ -80,36 +80,33 @@ ksu_registry() {
 		# exist before 5.10. It also carries compat/kernel_compat.c with a real
 		# fallback chain for renamed APIs (ksu_strncpy_from_user_nofault).
 		#
-		# The ref choice matters. v4.2.0-rc3 is required, not 'main' and not
-		# 'auto-hook':
+		# The ref choice matters. 'auto-hook' is required, not 'main':
 		#
-		#   * With CONFIG_KSU_MANUAL_HOOK, 'main' includes
+		#   * With CONFIG_KSU_MANUAL_HOOK, 'main' and v4.2.0-rc3 include
 		#     tools/manual_hook_check.mk unconditionally, which $(error)s unless
 		#     ksu_handle_execveat/ksu_handle_faccessat/... already appear in
 		#     fs/exec.c, fs/open.c, fs/stat.c and friends -- i.e. unless the
 		#     kernel source has already been patched by hand.
-		#   * 'auto-hook' softens that (it swaps in tools/auto_hook_detect.mk
-		#     and gates the hard check behind `ifneq ($(CONFIG_KALLSYMS_ALL),y)`,
-		#     which this kernel satisfies), but it is a moving development branch
-		#     whose commit count does not line up with any released manager.
-		#   * v4.2.0-rc3 is a tag, and ReSukiSU derives its driver version from
-		#     the commit count of the checked-out ref
-		#     (KSU_VERSION = 30000 + commits + 700). Measured: auto-hook has
-		#     4375 commits -> 35075, v4.2.0-rc3 has 4471 -> 35171, and the
-		#     v4.2.0-rc3 manager reports 35171. Building the tag is therefore
-		#     what makes the driver version match the manager and clears the
-		#     "kernel needs update" notice.
+		#   * 'auto-hook' replaces that with tools/auto_hook_detect.mk and gates
+		#     the hard check behind `ifneq ($(CONFIG_KALLSYMS_ALL),y)`. This
+		#     kernel sets CONFIG_KALLSYMS_ALL=y, so the check is skipped and
+		#     hook/auto_hook.c installs the hooks at runtime via
+		#     ksu_inline_hook_register().
 		#
-		# The tag has everything the tracepoint hook needs
-		# (hook/arm64/syscall_hook.c, syscall_hook_manager.c,
-		# syscall_event_bridge.c, tp_marker.c) and registers both __NR_execve
-		# and __NR_execveat. It lacks auto_hook.c/inline_hook.c, which is fine:
-		# inline hooking cannot work under CONFIG_CFI_CLANG anyway.
+		# v4.2.0-rc3 is deliberately NOT used, even though it is a tag (so more
+		# reproducible) and its commit count gives the exact version the
+		# released manager expects. It builds but does NOT boot on this device:
+		# it falls through to recovery. It additionally compiles
+		# feature/module_load_filter.o, which is the likely cause. See
+		# docs/resukisu-version-match.md. The version mismatch that would
+		# otherwise result is fixed by KSU_VERSION_PIN instead, which keeps this
+		# bootable ref.
 		#
-		# CONFIG_KSU_TRACEPOINT_HOOK is still not usable unpatched -- its
-		# Kbuild $(error)s out on GKI 1.0/Non-GKI -- which is what
-		# patches/resukisu_enable_tracepoint.sh exists to fix.
-		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|v4.2.0-rc3|v4.2.0-rc3|-|ReSukiSU" ;;
+		# CONFIG_KSU_TRACEPOINT_HOOK is not usable unpatched either: its Kbuild
+		# $(error)s out on GKI 1.0/Non-GKI. patches/resukisu_enable_tracepoint.sh
+		# is what makes it work, and it is the hook that actually functions on a
+		# CONFIG_CFI_CLANG kernel.
+		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|auto-hook|auto-hook|-|ReSukiSU" ;;
 	rsuntk)
 		echo "https://github.com/rsuntk/KernelSU|main|KernelSU|main|main|susfs-rksu-master|RKSU (rsuntk)" ;;
 	backslashxx)
