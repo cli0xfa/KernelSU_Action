@@ -532,6 +532,19 @@ resukisu_kernel_tp_fix() {
 		summary "| ReSukiSU version | pinned to ${KSU_VERSION_PIN} |"
 	fi
 
+	# Diagnostic: disable specific ReSukiSU init-path additions to find which one
+	# stops this kernel from booting. Empty by default; see
+	# patches/bisect_rc3_boot.sh.
+	if [ -n "${KSU_BISECT_SWITCHES:-}" ]; then
+		local bs="${REPO_ROOT}/patches/bisect_rc3_boot.sh"
+		[ -f "$bs" ] || die "patch script not found: ${bs}"
+		warn "KSU_BISECT_SWITCHES is set (${KSU_BISECT_SWITCHES}); this is an experimental build"
+		bash "$bs" "$ksu_dir" "${KSU_BISECT_SWITCHES}" \
+			|| die "bisect switches failed: ${KSU_BISECT_SWITCHES}"
+		ok "bisect switches applied"
+		summary "| bisect | ${KSU_BISECT_SWITCHES} |"
+	fi
+
 	summary "| ReSukiSU hook | tracepoint (patched for non-GKI) |"
 	endgroup
 }

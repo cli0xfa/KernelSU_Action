@@ -83,6 +83,11 @@ declare -A DEFAULTS=(
 	# number so it stops reporting a kernel mismatch. Empty means "leave the
 	# fork's own value alone".
 	[KSU_VERSION_PIN]=""
+	# Comma-separated list of ReSukiSU init-path additions to disable, for
+	# bisecting why a given ref fails to boot. See patches/bisect_rc3_boot.sh
+	# for the accepted names. Empty means "change nothing" -- this is a
+	# diagnostic switch, not a supported configuration.
+	[KSU_BISECT_SWITCHES]=""
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 
