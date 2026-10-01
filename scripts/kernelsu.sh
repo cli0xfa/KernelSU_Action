@@ -69,8 +69,33 @@ ksu_registry() {
 		# to add `ino`), and fs/proc/bootconfig.c does not exist in a 5.4 tree.
 		echo "https://github.com/SukiSU-Ultra/SukiSU-Ultra|main|KernelSU|main|main|-|SukiSU-Ultra" ;;
 	resukisu)
-		# Re-fork of SukiSU-Ultra aimed at legacy/non-GKI kernels.
-		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|main|main|-|ReSukiSU" ;;
+		# ReSukiSU is a SukiSU-Ultra re-fork specifically maintained for legacy
+		# kernels, and it is the only variant here that actually works on 5.4.
+		#
+		# Unlike SukiSU-Ultra it keeps the pre-5.10 SELinux path: selinux.h
+		# defines KSU_COMPAT_USE_SELINUX_STATE only for >= 5.10 (or an explicit
+		# backport), and rules.c/selinux_hide.c then use
+		# `selinux_state.ss->policydb` / `ss->status_lock` instead of the flat
+		# selinux_state.policy/.policy_mutex/.status_lock fields that do not
+		# exist before 5.10. It also carries compat/kernel_compat.c with a real
+		# fallback chain for renamed APIs (ksu_strncpy_from_user_nofault).
+		#
+		# The ref choice matters. 'auto-hook' is required, not 'main':
+		#
+		#   * With CONFIG_KSU_MANUAL_HOOK, 'main' and v4.2.0-rc3 include
+		#     tools/manual_hook_check.mk unconditionally, which $(error)s unless
+		#     ksu_handle_execveat/ksu_handle_faccessat/... already appear in
+		#     fs/exec.c, fs/open.c, fs/stat.c and friends -- i.e. unless the
+		#     kernel source has already been patched by hand.
+		#   * 'auto-hook' replaces that with tools/auto_hook_detect.mk and gates
+		#     the hard check behind `ifneq ($(CONFIG_KALLSYMS_ALL),y)`. This
+		#     kernel sets CONFIG_KALLSYMS_ALL=y, so the check is skipped and
+		#     hook/auto_hook.c installs the hooks at runtime by inline-patching
+		#     the syscall entry points via ksu_inline_hook_register().
+		#
+		# CONFIG_KSU_TRACEPOINT_HOOK is not an option either: it is upstream's
+		# default, but its Kbuild $(error)s out on GKI 1.0/Non-GKI.
+		echo "https://github.com/ReSukiSU/ReSukiSU|main|KernelSU|auto-hook|auto-hook|-|ReSukiSU" ;;
 	rsuntk)
 		echo "https://github.com/rsuntk/KernelSU|main|KernelSU|main|main|susfs-rksu-master|RKSU (rsuntk)" ;;
 	backslashxx)

@@ -375,6 +375,23 @@ hooks_patch_apply() {
 	local variant=${KSU_VARIANT:-none} kver
 	kver=$(kernel_version "$KERNEL_DIR") || return 0
 
+	# Some variants install their hooks at runtime even though they select a
+	# 'manual' hook mode, and must not be source-patched. ReSukiSU's 'auto-hook'
+	# ref is the case this exists for: its Kbuild includes
+	# tools/auto_hook_detect.mk, which sets -DKSU_HOOK_AUTO_*_HOOK for whatever
+	# is missing from the tree, and hook/auto_hook.c installs those hooks by
+	# inline-patching the syscall entry points at boot.
+	#
+	# Patching it anyway is not merely redundant, it breaks the link:
+	# patches/legacy_ksu_hooks.sh inserts calls to ksu_vfs_read_hook,
+	# ksu_handle_vfs_read and ksu_execveat_hook, none of which ReSukiSU defines.
+	# Its Kbuild even $(error)s on seeing those names, via check_incompatible.mk
+	# ("is incompatible hook").
+	if [ "$variant" = "resukisu" ] && is_true "${KSU_HOOKS_AUTO_HOOKED:-true}"; then
+		info "resukisu hooks itself at runtime (KSU_HOOKS_AUTO_HOOKED); skipping source hook patches"
+		return 0
+	fi
+
 	group "Applying manual syscall hooks (kernel ${kver})"
 
 	# ReSukiSU publishes scope-minimised hook patches keyed by kernel version.

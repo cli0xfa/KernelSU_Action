@@ -70,6 +70,9 @@ declare -A DEFAULTS=(
 	[KSU_VARIANT]="none"
 	[KSU_REF]=""
 	[KSU_HOOK_MODE]="auto"
+	# Set false to force source hook patches even for a variant that normally
+	# installs its hooks at runtime (see hooks_patch_apply in patches.sh).
+	[KSU_HOOKS_AUTO_HOOKED]="true"
 	[KSU_EXPECTED_SIZE]=""
 	[KSU_EXPECTED_HASH]=""
 
