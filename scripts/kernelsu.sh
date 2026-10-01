@@ -186,6 +186,20 @@ ksu_install() {
 	grep -q 'drivers/kernelsu/Kconfig' "${KERNEL_DIR}/drivers/Kconfig" \
 		|| die "drivers/Kconfig was not wired up for kernelsu"
 
+	# --- fix includes that assume a newer kernel than we are building --------
+	#
+	# <linux/pgtable.h> was split out of <asm/pgtable.h> in Linux 5.8. SukiSU's
+	# 'main' branch includes it unconditionally in feature/sucompat.c, so on a
+	# 5.4 kernel the build dies with:
+	#     fatal error: 'linux/pgtable.h' file not found
+	#
+	# That file needs nothing from it -- the only relevant calls it makes are
+	# kern_path() and path_put(), declared in linux/namei.h and linux/path.h,
+	# both of which it already includes. So drop the include, but only when the
+	# kernel actually lacks the header, and only for the KernelSU source, so a
+	# future fork that genuinely needs it is unaffected.
+	ksu_fix_legacy_includes "$ksu_dir" "$kver"
+
 	# Confirm we landed on the ref we asked for, catching the silent fallback.
 	local head_desc head_sha
 	head_sha=$(git -C "$ksu_dir" rev-parse --short HEAD)
@@ -222,6 +236,47 @@ ksu_install() {
 	summary "| KernelSU ref | \`${ref:-latest tag}\` -> \`${version_label}\` |"
 
 	endgroup
+}
+
+# -------------------------------------------------- legacy include repair ---
+#
+# Modern KernelSU forks assume a fairly new kernel and include headers that were
+# split out of older catch-all headers long after 5.4. Building them against a
+# 5.4 tree then fails at the first include with 'file not found', before any of
+# the interesting logic is even compiled.
+#
+# Each case below is checked against the kernel tree that is actually being
+# built, and only rewritten when the header is genuinely absent, so a fork that
+# does need the new header (on a kernel that has it) is left alone.
+ksu_fix_legacy_includes() {
+	local ksu_dir=$1 kver=$2
+	local file line fixed=0
+
+	# <linux/pgtable.h> -- split out of <asm/pgtable.h> in Linux 5.8.
+	#
+	# SukiSU 'main' includes it in feature/sucompat.c, which uses nothing from
+	# it: the only relevant calls are kern_path() and path_put(), declared in
+	# linux/namei.h and linux/path.h, both of which that file already includes.
+	file="${ksu_dir}/kernel/feature/sucompat.c"
+	if [ -f "$file" ] && [ ! -f "${KERNEL_DIR}/include/linux/pgtable.h" ] &&
+	   grep -q 'linux/pgtable\.h' "$file"; then
+		sed -i -E 's@^[[:space:]]*#include[[:space:]]+<linux/pgtable\.h>.*$@/* linux/pgtable.h does not exist before 5.8 (it was part of asm/pgtable.h) and\n * nothing here needs it: kern_path()/path_put() come from linux/namei.h and\n * linux/path.h, which are included above. */@' "$file"
+		warn "removed the <linux/pgtable.h> include from $(basename "$file") for kernel ${kver}"
+		fixed=$((fixed + 1))
+	fi
+
+	# <linux/hex.h> -- introduced in Linux 5.9; bin2hex() lived in linux/kernel.h
+	# before that, and every file here already includes linux/kernel.h.
+	file="${ksu_dir}/kernel/manager/apk_sign.c"
+	if [ -f "$file" ] && [ ! -f "${KERNEL_DIR}/include/linux/hex.h" ] &&
+	   grep -q 'linux/hex\.h' "$file"; then
+		sed -i -E 's@^[[:space:]]*#include[[:space:]]+<linux/hex\.h>.*$@/* linux/hex.h appeared in 5.9; bin2hex() is in linux/kernel.h before that,\n * which this file already includes. */@' "$file"
+		warn "removed the <linux/hex.h> include from $(basename "$file") for kernel ${kver}"
+		fixed=$((fixed + 1))
+	fi
+
+	[ "$fixed" -gt 0 ] && info "adjusted ${fixed} include(s) for kernel ${kver}"
+	return 0
 }
 
 # ------------------------------------------------------------ hook config ---
